@@ -7,13 +7,26 @@
 		["{", "}"],
 		["[", "]"],
 		["(", ")"]
-	]
-	/*
-	enhancedBrackets:[
-		{ openTrigger: 'n', open: /begin$/i, closeComplete: 'end', matchCase: true },
-		{ openTrigger: 'e', open: /case$/i, closeComplete: 'end', matchCase: true },
-		{ openTrigger: 'n', open: /when$/i, closeComplete: 'then', matchCase: true }
 	],
-	noindentBrackets: '()',
-	*/
+	"autoClosingPairs": [
+		["{", "}"],
+		["[", "]"],
+		["(", ")"],
+		["\"", "\""],
+		["'", "'"]
+	],
+	"surroundingPairs": [
+		["{", "}"],
+		["[", "]"],
+		["(", ")"],
+		["\"", "\""],
+		["'", "'"]
+	]
+
+	// enhancedBrackets:[
+	// 	{ openTrigger: 'n', open: /begin$/i, closeComplete: 'end', matchCase: true },
+	// 	{ openTrigger: 'e', open: /case$/i, closeComplete: 'end', matchCase: true },
+	// 	{ openTrigger: 'n', open: /when$/i, closeComplete: 'then', matchCase: true }
+	// ],
+	// noindentBrackets: '()',
 }

@@ -6,35 +6,36 @@
 'use strict';
 
 import 'vs/css!./media/sidebyside';
-import nls = require('vs/nls');
-import {Registry} from 'vs/platform/platform';
-import {Scope, IActionBarRegistry, Extensions} from 'vs/workbench/browser/actionBarRegistry';
-import {IAction, Action} from 'vs/base/common/actions';
 import arrays = require('vs/base/common/arrays');
-import {EventEmitter} from 'vs/base/common/eventEmitter';
+import Event, {Emitter} from 'vs/base/common/event';
 import {StandardMouseEvent} from 'vs/base/browser/mouseEvent';
-import errors = require('vs/base/common/errors');
-import {isWindows} from 'vs/base/common/platform';
 import types = require('vs/base/common/types');
 import {Dimension, Builder, $} from 'vs/base/browser/builder';
 import {Sash, ISashEvent, IVerticalSashLayoutProvider} from 'vs/base/browser/ui/sash/sash';
 import {ProgressBar} from 'vs/base/browser/ui/progressbar/progressbar';
 import {BaseEditor} from 'vs/workbench/browser/parts/editor/baseEditor';
-import {EditorInput, IInputStatus, TextEditorOptions} from 'vs/workbench/common/editor';
-import {DiffEditorInput} from 'vs/workbench/browser/parts/editor/diffEditorInput';
-import {EventType as BaseEventType} from 'vs/base/common/events';
-import {EditorInputEvent, EventType as WorkbenchEventType} from 'vs/workbench/browser/events';
 import DOM = require('vs/base/browser/dom');
-import {IActionItem, ActionsOrientation} from 'vs/base/browser/ui/actionbar/actionbar';
-import {ToolBar} from 'vs/base/browser/ui/toolbar/toolbar';
-import {IWorkbenchEditorService, EditorArrangement} from 'vs/workbench/services/editor/common/editorService';
-import {IQuickOpenService} from 'vs/workbench/services/quickopen/browser/quickOpenService';
-import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
-import {IContextViewService, IContextMenuService} from 'vs/platform/contextview/browser/contextView';
+import errors = require('vs/base/common/errors');
+import {isMacintosh} from 'vs/base/common/platform';
+import {IWorkbenchEditorService, GroupArrangement} from 'vs/workbench/services/editor/common/editorService';
+import {IContextMenuService} from 'vs/platform/contextview/browser/contextView';
 import {Position, POSITIONS} from 'vs/platform/editor/common/editor';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
 import {IEventService} from 'vs/platform/event/common/event';
-import {IMessageService, Severity} from 'vs/platform/message/common/message';
+import {IMessageService} from 'vs/platform/message/common/message';
 import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
+import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
+import {ServiceCollection} from 'vs/platform/instantiation/common/serviceCollection';
+import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
+import {IExtensionService} from 'vs/platform/extensions/common/extensions';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
+import {TabsTitleControl} from 'vs/workbench/browser/parts/editor/tabsTitleControl';
+import {TitleControl} from 'vs/workbench/browser/parts/editor/titleControl';
+import {NoTabsTitleControl} from 'vs/workbench/browser/parts/editor/noTabsTitleControl';
+import {IEditorStacksModel, IStacksModelChangeEvent, IWorkbenchEditorConfiguration, EditorOptions} from 'vs/workbench/common/editor';
+import {ITitleAreaControl} from 'vs/workbench/browser/parts/editor/titleControl';
+import {extractResources} from 'vs/base/browser/dnd';
 
 export enum Rochade {
 	NONE,
@@ -43,37 +44,65 @@ export enum Rochade {
 	CENTER_AND_RIGHT_TO_LEFT
 }
 
-export const EventType = {
-	EDITOR_FOCUS_CHANGED: 'editorFocusChanged'
-};
+export enum ProgressState {
+	INFINITE,
+	DONE,
+	STOP
+}
+
+export interface ISideBySideEditorControl {
+
+	onGroupFocusChanged: Event<void>;
+
+	show(editor: BaseEditor, container: Builder, position: Position, preserveActive: boolean, widthRatios?: number[]): void;
+	hide(editor: BaseEditor, container: Builder, position: Position, layoutAndRochade: boolean): Rochade;
+
+	setActive(editor: BaseEditor): void;
+
+	getActiveEditor(): BaseEditor;
+	getActivePosition(): Position;
+
+	move(from: Position, to: Position): void;
+
+	isDragging(): boolean;
+
+	getInstantiationService(position: Position): IInstantiationService;
+	getProgressBar(position: Position): ProgressBar;
+	updateProgress(position: Position, state: ProgressState): void;
+
+	layout(dimension: Dimension): void;
+	layout(position: Position): void;
+
+	arrangeGroups(arrangement: GroupArrangement): void;
+
+	getWidthRatios(): number[];
+	dispose(): void;
+}
 
 /**
  * Helper class to manage multiple side by side editors for the editor part.
  */
-export class SideBySideEditorControl extends EventEmitter implements IVerticalSashLayoutProvider {
+export class SideBySideEditorControl implements ISideBySideEditorControl, IVerticalSashLayoutProvider {
+
 	private static MIN_EDITOR_WIDTH = 170;
 	private static EDITOR_TITLE_HEIGHT = 35;
 	private static SNAP_TO_MINIMIZED_THRESHOLD = 50;
 
+	private stacks: IEditorStacksModel;
+
 	private parent: Builder;
 	private dimension: Dimension;
 	private dragging: boolean;
+
+	private instantiationServices: IInstantiationService[];
 
 	private containers: Builder[];
 	private containerWidth: number[];
 	private containerInitialRatios: number[];
 
 	private titleContainer: Builder[];
-	private titleLabel: Builder[];
-	private titleDescription: Builder[];
-	private editorInputStateDescription: Builder[];
+	private titleAreaControl: ITitleAreaControl[];
 	private progressBar: ProgressBar[];
-	private editorActionsToolbar: ToolBar[];
-	private closeEditorAction: Action[];
-
-	private editorInputStateHoverTimeout: number;
-
-	private splitEditorAction: Action;
 
 	private leftSash: Sash;
 	private startLeftContainerWidth: number;
@@ -88,108 +117,102 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 	private lastActivePosition: Position;
 
 	private visibleEditorFocusTrackers: DOM.IFocusTracker[];
-	private globalFocusTracker: DOM.IFocusTracker;
-	private editorInputStateChangeListener: () => void;
+
+	private _onGroupFocusChanged: Emitter<void>;
+
+	private toDispose: IDisposable[];
 
 	constructor(
 		parent: Builder,
 		@IWorkbenchEditorService private editorService: IWorkbenchEditorService,
+		@IEditorGroupService private editorGroupService: IEditorGroupService,
 		@IMessageService private messageService: IMessageService,
-		@IQuickOpenService private quickOpenService: IQuickOpenService,
 		@ITelemetryService private telemetryService: ITelemetryService,
-		@IContextViewService private contextViewService: IContextViewService,
 		@IContextMenuService private contextMenuService: IContextMenuService,
 		@IEventService private eventService: IEventService,
-		@IWorkspaceContextService private contextService: IWorkspaceContextService
+		@IConfigurationService private configurationService: IConfigurationService,
+		@IKeybindingService private keybindingService: IKeybindingService,
+		@IExtensionService private extensionService: IExtensionService,
+		@IInstantiationService private instantiationService: IInstantiationService
 	) {
-		super();
+		this.stacks = editorGroupService.getStacksModel();
 
 		this.parent = parent;
 		this.dimension = new Dimension(0, 0);
+
+		this.instantiationServices = [];
 
 		this.containers = [];
 		this.containerWidth = [];
 
 		this.titleContainer = [];
-		this.titleLabel = [];
-		this.titleDescription = [];
-		this.editorInputStateDescription = [];
-		this.editorActionsToolbar = [];
+		this.titleAreaControl = [];
+
 		this.progressBar = [];
 
 		this.visibleEditors = [];
 		this.visibleEditorContainers = [];
 		this.visibleEditorFocusTrackers = [];
 
-		this.closeEditorAction = POSITIONS.map((position) => {
-			return this.makeCloseEditorAction(position);
-		});
+		this._onGroupFocusChanged = new Emitter<void>();
 
-		this.splitEditorAction = this.makeSplitEditorAction();
-		this.initStyles();
+		this.toDispose = [];
 
-		this.registerListeners();
-
-		// Create
 		this.create(this.parent);
+		this.registerListeners();
 	}
 
 	private registerListeners(): void {
-
-		// Update editor input state indicators on state changes
-		this.editorInputStateChangeListener = this.eventService.addListener(WorkbenchEventType.EDITOR_INPUT_STATE_CHANGED, (event: EditorInputEvent) => {
-			this.updateEditorInputStateIndicator(event);
-		});
+		this.toDispose.push(this.stacks.onModelChanged(e => this.onStacksChanged(e)));
+		this.toDispose.push(this.configurationService.onDidUpdateConfiguration(e => this.onConfigurationUpdated(e.config)));
+		this.extensionService.onReady().then(() => this.onExtensionsReady());
 	}
 
-	private initStyles(): void {
-		let grabCursor = isWindows ? 'cursor: url("' + require.toUrl('vs/workbench/browser/parts/editor/media/grab.cur') + '"), move;' : 'cursor: -webkit-grab;';
-		let grabbingCursor = isWindows ? 'cursor: url("' + require.toUrl('vs/workbench/browser/parts/editor/media/grabbing.cur') + '"), move;' : 'cursor: -webkit-grabbing;';
+	private onConfigurationUpdated(configuration: IWorkbenchEditorConfiguration): void {
+		POSITIONS.forEach(position => {
+			const titleControl = this.titleAreaControl[position];
+			if (titleControl) {
+				const usingTabs = (titleControl instanceof TabsTitleControl);
+				const useTabs = configuration.workbench.editor.showTabs;
+				if (usingTabs !== useTabs) {
 
-		DOM.createCSSRule(
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container .title, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container .title .title-label a, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container .title .title-label span', grabCursor
-		);
+					// Dispose old
+					titleControl.dispose();
+					this.titleContainer[position].empty();
 
-		DOM.createCSSRule(
-			'#monaco-workbench-editor-move-overlay, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container.dragged, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container.dragged .title, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container.dragged .title .title-label a, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container.dragged .title .title-label span, ' +
-			'.monaco-workbench > .part.editor > .content.multiple-editors .one-editor-container.dragged .monaco-editor .view-lines', grabbingCursor
-		);
-	}
-
-	private makeCloseEditorAction(position: Position): Action {
-		return new Action('close.editor.action', nls.localize('close', "Close"), 'close-editor-action', true, () => {
-			return this.editorService.closeEditor(position);
-		});
-	}
-
-	private makeSplitEditorAction(): Action {
-		return new Action('split.editor.action', nls.localize('splitEditor', "Split Editor"), 'split-editor-action', true, () => {
-			let activeEditor = this.editorService.getActiveEditor();
-			let editorCount = this.getVisibleEditorCount();
-
-			// Special case: If the user wants to split the left hand editor with 2 editors open, push the center one to the right
-			if (editorCount > 1 && activeEditor.position === Position.LEFT) {
-				let centerInput = this.visibleEditors[Position.CENTER].input;
-
-				let options = new TextEditorOptions();
-				options.preserveFocus = true;
-
-				return this.editorService.openEditor(activeEditor.input, options, Position.CENTER).then(() => {
-					return this.editorService.openEditor(centerInput, options, Position.RIGHT).then(() => {
-						return this.editorService.focusEditor(Position.CENTER);
-					});
-				});
+					// Create new
+					this.createTitleControl(position);
+				}
 			}
-
-			// Otherwise just continue to open to the side
-			return this.editorService.openEditor(activeEditor.input, null, true);
 		});
+	}
+
+	private onExtensionsReady(): void {
+
+		// Up to date title areas
+		POSITIONS.forEach(position => this.titleAreaControl[position].update());
+	}
+
+	private onStacksChanged(e: IStacksModelChangeEvent): void {
+
+		// Up to date context
+		POSITIONS.forEach(position => {
+			this.titleAreaControl[position].setContext(this.stacks.groupAt(position));
+		});
+
+		// Refresh / update if group is visible and has a position
+		const position = this.stacks.positionOfGroup(e.group);
+		if (position >= 0) {
+			if (e.structural) {
+				this.titleAreaControl[position].refresh();
+			} else {
+				this.titleAreaControl[position].update();
+			}
+		}
+	}
+
+	public get onGroupFocusChanged(): Event<void> {
+		return this._onGroupFocusChanged.event;
 	}
 
 	public show(editor: BaseEditor, container: Builder, position: Position, preserveActive: boolean, widthRatios?: number[]): void {
@@ -288,38 +311,10 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 	}
 
 	private getVisibleEditorCount(): number {
-		let c = 0;
-		this.visibleEditors.forEach((editor) => {
-			if (editor) {
-				c++;
-			}
-		});
-
-		return c;
-	}
-
-	private indexOf(editor: BaseEditor): number {
-		return this.visibleEditors.indexOf(editor);
+		return this.visibleEditors.filter(v => !!v).length;
 	}
 
 	private trackFocus(editor: BaseEditor, position: Position): void {
-
-		// Global focus tracker to support focus changes into iframes
-		if (!this.globalFocusTracker) {
-			this.globalFocusTracker = DOM.trackFocus(window.document.body);
-			this.globalFocusTracker.addBlurListener(() => {
-				let activeElement = window.document.activeElement;
-				if (activeElement) {
-					for (let i = 0; i < this.visibleEditorContainers.length; i++) {
-						let container = this.visibleEditorContainers[i];
-						if (container && DOM.isAncestor(activeElement, container.getHTMLElement())) {
-							this.onFocusGained(this.visibleEditors[i]);
-							break;
-						}
-					}
-				}
-			});
-		}
 
 		// In case there is a previous tracker on the position, dispose it first
 		if (this.visibleEditorFocusTrackers[position]) {
@@ -341,7 +336,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 		// Update active editor and position
 		if (this.lastActiveEditor !== editor) {
-			this.doSetActive(editor, this.indexOf(editor));
+			this.doSetActive(editor, this.visibleEditors.indexOf(editor));
 
 			// Automatically maximize this position if it has min editor width
 			if (this.containerWidth[this.lastActivePosition] === SideBySideEditorControl.MIN_EDITOR_WIDTH) {
@@ -378,7 +373,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 			}
 
 			// Re-emit to outside
-			this.emit(EventType.EDITOR_FOCUS_CHANGED);
+			this._onGroupFocusChanged.fire();
 		}
 	}
 
@@ -388,7 +383,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		if (!types.isUndefinedOrNull(this.lastActivePosition) && this.containerWidth[this.lastActivePosition] === SideBySideEditorControl.MIN_EDITOR_WIDTH) {
 			let candidate: Position = null;
 			let currentWidth = SideBySideEditorControl.MIN_EDITOR_WIDTH;
-			POSITIONS.forEach((position) => {
+			POSITIONS.forEach(position => {
 
 				// Skip current active position and check if the editor is larger than min width
 				if (position !== this.lastActivePosition) {
@@ -401,7 +396,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 			// Focus editor if a candidate has been found
 			if (!types.isUndefinedOrNull(candidate)) {
-				this.editorService.focusEditor(this.visibleEditors[candidate]).done(null, errors.onUnexpectedError);
+				this.editorGroupService.focusGroup(candidate);
 			}
 		}
 	}
@@ -451,7 +446,6 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 				if (position === Position.LEFT) {
 					this.rochade(Position.CENTER, Position.LEFT);
 					result = Rochade.CENTER_TO_LEFT;
-					this.clearTitle(Position.CENTER); // center closes so clear title
 				}
 
 				this.layoutContainers();
@@ -470,7 +464,6 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 				if (position === Position.CENTER) {
 					this.rochade(Position.RIGHT, Position.CENTER);
 					result = Rochade.RIGHT_TO_CENTER;
-					this.clearTitle(Position.RIGHT); // right closes so clear title
 				}
 
 				// Move RIGHT to CENTER and CENTER to LEFT ([x]|[]|[] -> [ ]|[ ])
@@ -478,7 +471,6 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 					this.rochade(Position.CENTER, Position.LEFT);
 					this.rochade(Position.RIGHT, Position.CENTER);
 					result = Rochade.CENTER_AND_RIGHT_TO_LEFT;
-					this.clearTitle(Position.RIGHT); // right closes so clear title
 				}
 
 				this.layoutContainers();
@@ -528,19 +520,8 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 	}
 
 	private doSetActive(editor: BaseEditor, newActive: Position): void {
-		let oldActive = this.lastActivePosition;
 		this.lastActivePosition = newActive;
 		this.lastActiveEditor = editor;
-
-		if (!types.isUndefinedOrNull(oldActive)) {
-			this.containers[oldActive].addClass('inactive');
-			this.containers[oldActive].removeClass('active');
-		}
-
-		if (!types.isUndefinedOrNull(newActive)) {
-			this.containers[newActive].removeClass('inactive');
-			this.containers[newActive].addClass('active');
-		}
 	}
 
 	private clearPosition(position: Position): void {
@@ -567,13 +548,14 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 		// Change data structures
 		let listeners = this.visibleEditorFocusTrackers[from];
-		this.visibleEditorContainers[to] = editorContainer;
-		this.visibleEditors[to] = editor;
 		this.visibleEditorFocusTrackers[to] = listeners;
-
-		this.visibleEditorContainers[from] = null;
-		this.visibleEditors[from] = null;
 		this.visibleEditorFocusTrackers[from] = null;
+
+		this.visibleEditorContainers[to] = editorContainer;
+		this.visibleEditorContainers[from] = null;
+
+		this.visibleEditors[to] = editor;
+		this.visibleEditors[from] = null;
 
 		// Update last active position
 		if (this.lastActivePosition === from) {
@@ -676,7 +658,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		this.layoutContainers();
 	}
 
-	public arrangeEditors(arrangement: EditorArrangement): void {
+	public arrangeGroups(arrangement: GroupArrangement): void {
 		if (!this.dimension) {
 			return; // too early
 		}
@@ -689,8 +671,8 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		}
 
 		// Minimize Others
-		if (arrangement === EditorArrangement.MINIMIZE_OTHERS) {
-			POSITIONS.forEach((position) => {
+		if (arrangement === GroupArrangement.MINIMIZE_OTHERS) {
+			POSITIONS.forEach(position => {
 				if (this.visibleEditors[position]) {
 					if (position !== this.lastActivePosition) {
 						this.containerWidth[position] = SideBySideEditorControl.MIN_EDITOR_WIDTH;
@@ -703,8 +685,8 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		}
 
 		// Even Widths
-		else if (arrangement === EditorArrangement.EVEN_WIDTH) {
-			POSITIONS.forEach((position) => {
+		else if (arrangement === GroupArrangement.EVEN_WIDTH) {
+			POSITIONS.forEach(position => {
 				if (this.visibleEditors[position]) {
 					this.containerWidth[position] = availableWidth / visibleEditors;
 				}
@@ -720,7 +702,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		if (this.dimension) {
 			let fullWidth = this.dimension.width;
 
-			POSITIONS.forEach((position) => {
+			POSITIONS.forEach(position => {
 				if (this.visibleEditors[position]) {
 					ratio.push(this.containerWidth[position] / fullWidth);
 				}
@@ -740,95 +722,306 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 	private create(parent: Builder): void {
 
+		// Allow to drop into container to open
+		this.enableDropTarget(parent.getHTMLElement());
+
 		// Left Container
-		this.containers[Position.LEFT] = $(parent).div({ class: 'one-editor-container editor-left' });
+		this.containers[Position.LEFT] = $(parent).div({ class: 'one-editor-container editor-left monaco-editor-background' });
 
 		// Left Sash
 		this.leftSash = new Sash(parent.getHTMLElement(), this, { baseSize: 5 });
-		this.leftSash.addListener('start', () => this.onLeftSashDragStart());
-		this.leftSash.addListener('change', (e: ISashEvent) => this.onLeftSashDrag(e));
-		this.leftSash.addListener('end', () => this.onLeftSashDragEnd());
+		this.toDispose.push(this.leftSash.addListener2('start', () => this.onLeftSashDragStart()));
+		this.toDispose.push(this.leftSash.addListener2('change', (e: ISashEvent) => this.onLeftSashDrag(e)));
+		this.toDispose.push(this.leftSash.addListener2('end', () => this.onLeftSashDragEnd()));
+		this.toDispose.push(this.leftSash.addListener2('reset', () => this.onLeftSashReset()));
 		this.leftSash.hide();
 
 		// Center Container
-		this.containers[Position.CENTER] = $(parent).div({ class: 'one-editor-container editor-center' });
+		this.containers[Position.CENTER] = $(parent).div({ class: 'one-editor-container editor-center monaco-editor-background' });
 
 		// Right Sash
 		this.rightSash = new Sash(parent.getHTMLElement(), this, { baseSize: 5 });
-		this.rightSash.addListener('start', () => this.onRightSashDragStart());
-		this.rightSash.addListener('change', (e: ISashEvent) => this.onRightSashDrag(e));
-		this.rightSash.addListener('end', () => this.onRightSashDragEnd());
+		this.toDispose.push(this.rightSash.addListener2('start', () => this.onRightSashDragStart()));
+		this.toDispose.push(this.rightSash.addListener2('change', (e: ISashEvent) => this.onRightSashDrag(e)));
+		this.toDispose.push(this.rightSash.addListener2('end', () => this.onRightSashDragEnd()));
+		this.toDispose.push(this.rightSash.addListener2('reset', () => this.onRightSashReset()));
 		this.rightSash.hide();
 
 		// Right Container
-		this.containers[Position.RIGHT] = $(parent).div({ class: 'one-editor-container editor-right' });
+		this.containers[Position.RIGHT] = $(parent).div({ class: 'one-editor-container editor-right monaco-editor-background' });
+
+		// InstantiationServices
+		POSITIONS.forEach(position => {
+			this.instantiationServices[position] = this.instantiationService.createChild(new ServiceCollection(
+				[IKeybindingService, this.keybindingService.createScoped(this.containers[position].getHTMLElement())]
+				// [IProgressService, ]
+			));
+		});
 
 		// Title containers
-		POSITIONS.forEach((position) => {
-			this.titleContainer[position] = $(this.containers[position]).div({ 'class': 'title monaco-editor-background' });
-			this.fillTitleArea($(this.titleContainer[position]), position);
+		POSITIONS.forEach(position => {
+			this.titleContainer[position] = $(this.containers[position]).div({ 'class': 'title' });
+			this.hookTitleDragListener(position);
+
+			// Title Control
+			this.createTitleControl(position);
 		});
 
 		// Progress Bars per position
-		POSITIONS.forEach((position) => {
+		POSITIONS.forEach(position => {
 			this.progressBar[position] = new ProgressBar($(this.containers[position]));
 			this.progressBar[position].getContainer().hide();
 		});
 	}
 
-	private updateEditorInputStateIndicator(inputEvent: EditorInputEvent): void {
-		POSITIONS.forEach((position) => {
-			if (this.visibleEditors[position]) {
-				if (this.isInputRelated(this.visibleEditors[position].input, inputEvent.editorInput)) {
-					this.setEditorInputStateIndicator(inputEvent.editorInput, inputEvent.editorInput.getStatus(), position);
+	private enableDropTarget(node: HTMLElement): void {
+		const $this = this;
+		const overlayId = 'monaco-workbench-editor-drop-overlay';
+		const splitToPropertyKey = 'splitToPosition';
+		const stacks = this.editorGroupService.getStacksModel();
+		let overlay: Builder;
+
+		function onDrop(e: DragEvent, position: Position, splitTo?: Position): void {
+			DOM.removeClass(node, 'dropfeedback');
+			destroyOverlay();
+
+			const editorService = $this.editorService;
+			const groupService = $this.editorGroupService;
+
+			const splitEditor = (typeof splitTo === 'number'); // TODO@Ben ugly split code should benefit from empty group support once available!
+			const freeGroup = (stacks.groups.length === 1) ? Position.CENTER : Position.RIGHT;
+			const pinned = EditorOptions.create({ pinned: true });
+
+			// Check for transfer from title control
+			const draggedEditor = TitleControl.getDraggedEditor();
+			if (draggedEditor) {
+				const isCopy = (e.ctrlKey && !isMacintosh) || (e.altKey && isMacintosh);
+
+				// Copy editor to new location
+				if (isCopy) {
+					if (splitEditor) {
+						editorService.openEditor(draggedEditor.editor, pinned, freeGroup).then(() => {
+							if (splitTo !== freeGroup) {
+								groupService.moveGroup(freeGroup, splitTo);
+							}
+						}).done(null, errors.onUnexpectedError);
+					} else {
+						editorService.openEditor(draggedEditor.editor, pinned, position).done(null, errors.onUnexpectedError);
+					}
+				}
+
+				// Move editor to new location
+				else {
+					const sourcePosition = stacks.positionOfGroup(draggedEditor.group);
+					if (splitEditor) {
+						if (draggedEditor.group.count === 1) {
+							groupService.moveGroup(sourcePosition, splitTo);
+						} else {
+							editorService.openEditor(draggedEditor.editor, pinned, freeGroup).then(() => {
+								if (splitTo !== freeGroup) {
+									groupService.moveGroup(freeGroup, splitTo);
+								}
+								groupService.moveEditor(draggedEditor.editor, stacks.positionOfGroup(draggedEditor.group), splitTo);
+							}).done(null, errors.onUnexpectedError);
+						}
+
+					} else {
+						groupService.moveEditor(draggedEditor.editor, sourcePosition, position);
+					}
 				}
 			}
+
+			// Check for URI transfer
+			else {
+				const droppedResources = extractResources(e).filter(r => r.scheme === 'file' || r.scheme === 'untitled');
+				if (droppedResources.length) {
+					window.focus(); // make sure this window has focus so that the open call reaches the right window!
+
+					// Open all
+					editorService.openEditors(droppedResources.map(resource => { return { input: { resource, options: { pinned: true } }, position: splitEditor ? freeGroup : position }; }))
+						.then(() => {
+							if (splitEditor && splitTo !== freeGroup) {
+								groupService.moveGroup(freeGroup, splitTo);
+							}
+
+							groupService.focusGroup(splitEditor ? splitTo : position);
+						})
+						.done(null, errors.onUnexpectedError);
+				}
+			}
+		}
+
+		function destroyOverlay(): void {
+			if (overlay) {
+				overlay.destroy();
+				overlay = void 0;
+			}
+		}
+
+		function positionOverlay(e: DragEvent, groups: number, position: Position): void {
+			const target = <HTMLElement>e.target;
+			const posXOnOverlay = e.offsetX;
+			const overlayIsSplit = typeof overlay.getProperty(splitToPropertyKey) === 'number';
+			const overlayWidth = target.clientWidth;
+			const splitThreshold = overlayIsSplit ? overlayWidth / 5 : overlayWidth / 10;
+			const isCopy = (e.ctrlKey && !isMacintosh) || (e.altKey && isMacintosh);
+			const draggedEditor = TitleControl.getDraggedEditor();
+
+			const isOverSplitLeft = posXOnOverlay < splitThreshold;
+			const isOverSplitRight = posXOnOverlay + splitThreshold > overlayWidth;
+
+			let splitTarget: Position;
+
+			// No splitting if we reached maximum group count
+			if (groups === POSITIONS.length) {
+				splitTarget = null;
+			}
+
+			// Special splitting if we drag an editor of a group with only one editor
+			else if (!isCopy && draggedEditor && draggedEditor.group.count === 1) {
+				const positionOfDraggedEditor = stacks.positionOfGroup(draggedEditor.group);
+				switch (positionOfDraggedEditor) {
+					case Position.LEFT:
+						if (position === Position.CENTER && isOverSplitRight) {
+							splitTarget = Position.CENTER; // allow to move single editor from LEFT to CENTER
+						}
+						break;
+					case Position.CENTER:
+						if (position === Position.LEFT && isOverSplitLeft) {
+							splitTarget = Position.LEFT; // allow to move single editor from CENTER to LEFT
+						}
+						break;
+					default:
+						splitTarget = null; // splitting not allowed
+				}
+			}
+
+			// Any other case, check for mouse position
+			else {
+				if (isOverSplitRight) {
+					splitTarget = (position === Position.LEFT) ? Position.CENTER : Position.RIGHT;
+				} else if (isOverSplitLeft) {
+					splitTarget = (position === Position.LEFT) ? Position.LEFT : Position.CENTER;
+				}
+			}
+
+			// Apply split target
+			const canSplit = (typeof splitTarget === 'number');
+			if (canSplit) {
+				overlay.setProperty(splitToPropertyKey, splitTarget);
+			} else {
+				overlay.removeProperty(splitToPropertyKey);
+			}
+
+			// Update overlay styles
+			if (canSplit && isOverSplitRight) {
+				overlay.style({
+					left: '50%',
+					width: '50%',
+				});
+			} else if (canSplit && isOverSplitLeft) {
+				overlay.style({
+					width: '50%'
+				});
+			} else {
+				overlay.style({
+					left: '0',
+					width: '100%'
+				});
+			}
+
+			// Make sure the overlay is visible
+			overlay.style({ opacity: 1 });
+		}
+
+		function createOverlay(target: HTMLElement): void {
+			if (!overlay) {
+				const containers = $this.visibleEditorContainers.filter(c => !!c);
+				containers.forEach((container, index) => {
+					if (container && DOM.isAncestor(target, container.getHTMLElement())) {
+						const useTabs = !!$this.configurationService.getConfiguration<IWorkbenchEditorConfiguration>().workbench.editor.showTabs;
+
+						overlay = $('div').style({
+							top: useTabs ? SideBySideEditorControl.EDITOR_TITLE_HEIGHT + 'px' : 0,
+							height: useTabs ? `calc(100% - ${SideBySideEditorControl.EDITOR_TITLE_HEIGHT}px` : '100%'
+						}).id(overlayId);
+
+						overlay.appendTo(container);
+
+						overlay.on(DOM.EventType.DROP, (e: DragEvent) => {
+							DOM.EventHelper.stop(e, true);
+							onDrop(e, index, overlay.getProperty(splitToPropertyKey));
+						});
+
+						overlay.on(DOM.EventType.DRAG_OVER, (e: DragEvent) => {
+							positionOverlay(e, containers.length, index);
+						});
+
+						overlay.on([DOM.EventType.DRAG_LEAVE, DOM.EventType.DRAG_END], () => {
+							destroyOverlay();
+						});
+					}
+				});
+			}
+		}
+
+		// Let a dropped file open inside Code (only if dropped over editor area)
+		this.toDispose.push(DOM.addDisposableListener(node, DOM.EventType.DROP, (e: DragEvent) => {
+			DOM.EventHelper.stop(e, true);
+			onDrop(e, Position.LEFT);
+		}));
+
+		// Drag over
+		this.toDispose.push(DOM.addDisposableListener(node, DOM.EventType.DRAG_OVER, (e: DragEvent) => {
+			DOM.addClass(node, 'dropfeedback');
+
+			const target = <HTMLElement>e.target;
+			if (target) {
+				if (overlay && target.id !== overlayId) {
+					destroyOverlay(); // somehow we managed to move the mouse quickly out of the current overlay, so destroy it
+				}
+
+				createOverlay(target);
+			}
+		}));
+
+		// Drag leave
+		this.toDispose.push(DOM.addDisposableListener(node, DOM.EventType.DRAG_LEAVE, (e: DragEvent) => {
+			DOM.removeClass(node, 'dropfeedback');
+		}));
+
+		// Drag end (also install globally to be safe)
+		[node, window].forEach(container => {
+			this.toDispose.push(DOM.addDisposableListener(container, DOM.EventType.DRAG_END, (e: DragEvent) => {
+				DOM.removeClass(node, 'dropfeedback');
+				destroyOverlay();
+			}));
 		});
 	}
 
-	private setEditorInputStateIndicator(input: EditorInput, status: IInputStatus, position: number): void {
+	private createTitleControl(position: Position): void {
+		const useTabs = !!this.configurationService.getConfiguration<IWorkbenchEditorConfiguration>().workbench.editor.showTabs;
 
-		// Decoration
-		let titleLabel = (input && input.getName()) || '';
-		if (status && status.decoration) {
-			titleLabel = nls.localize('inputDecoration', "{0} {1}", status.decoration, titleLabel);
-		}
-
-		this.titleLabel[position].safeInnerHtml(titleLabel);
+		this.titleAreaControl[position] = this.instantiationServices[position].createInstance<ITitleAreaControl>(useTabs ? TabsTitleControl : NoTabsTitleControl);
+		this.titleAreaControl[position].create(this.titleContainer[position].getHTMLElement());
+		this.titleAreaControl[position].setContext(this.stacks.groupAt(position));
+		this.titleAreaControl[position].refresh();
 	}
 
-	private isInputRelated(sourceInput: EditorInput, targetInput: EditorInput): boolean {
-		if (!sourceInput || !targetInput) {
-			return false;
-		}
-
-		if (sourceInput === targetInput) {
-			return true;
-		}
-
-		if (sourceInput instanceof DiffEditorInput) {
-			let modifiedInput = (<DiffEditorInput>sourceInput).getModifiedInput();
-			if (modifiedInput === targetInput) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	private fillTitleArea(parent: Builder, position: Position): void {
-		let ignoreClick = false;
+	private hookTitleDragListener(position: Position): void {
 		let wasDragged = false;
 
 		// Allow to reorder positions by dragging the title
-		parent.on(DOM.EventType.MOUSE_DOWN, (e: MouseEvent) => {
+		this.titleContainer[position].on(DOM.EventType.MOUSE_DOWN, (e: MouseEvent) => {
+			if (!this.titleAreaControl[position].allowDragging(<any>e.target || e.srcElement)) {
+				return; // return early if we are not in the drag zone of the title widget
+			}
 
 			// Reset flag
-			ignoreClick = false;
 			wasDragged = false;
 
 			// Return early if there is only one editor active or the user clicked into the toolbar
-			if (this.getVisibleEditorCount() <= 1 || DOM.isAncestor(<any>e.target || e.srcElement, this.editorActionsToolbar[position].getContainer().getHTMLElement())) {
+			if (this.getVisibleEditorCount() <= 1) {
 				return;
 			}
 
@@ -839,14 +1032,10 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 			DOM.EventHelper.stop(e);
 
-			// Overlay the editor area with a div to be able to capture all mouse events (helps when iframes are used in any editor)
+			// Overlay the editor area with a div to be able to capture all mouse events
 			let overlayDiv = $('div').style({
-				position: 'absolute',
 				top: SideBySideEditorControl.EDITOR_TITLE_HEIGHT + 'px',
-				left: 0,
-				width: '100%',
-				height: '100%',
-				zIndex: 3000000
+				height: '100%'
 			}).id('monaco-workbench-editor-move-overlay');
 			overlayDiv.appendTo(this.parent);
 
@@ -991,7 +1180,13 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 				// Move to valid position if any
 				if (moveTo !== null) {
-					this.editorService.moveEditor(position, moveTo);
+					this.editorGroupService.moveGroup(position, moveTo);
+
+					// To reduce flickering during this operation we trigger a refresh of all
+					// title controls right after.
+					POSITIONS.forEach(p => {
+						this.titleAreaControl[p].refresh(true);
+					});
 				}
 
 				// Otherwise layout to restore proper positioning
@@ -999,80 +1194,13 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 					this.layoutContainers();
 				}
 
-				// Ignore next click if the user dragged the title some distance
-				if (wasDragged) {
-					ignoreClick = true;
-				}
-
-				// Otherwise if not dragging, make editor active unless already active
-				else if (position !== this.getActivePosition()) {
-					this.editorService.focusEditor(this.visibleEditors[position]).done(null, errors.onUnexpectedError);
+				// If not dragging, make editor group active unless already active
+				if (!wasDragged && position !== this.getActivePosition()) {
+					this.editorGroupService.focusGroup(position);
 				}
 
 				$window.off('mousemove');
 			});
-		});
-
-		// Close editor on middle mouse click
-		parent.on(DOM.EventType.MOUSE_UP, (e: MouseEvent) => {
-			DOM.EventHelper.stop(e, false);
-
-			// Close editor on middle mouse click
-			if (e.button === 1 /* Middle Button */) {
-				this.editorService.closeEditor(position).done(null, errors.onUnexpectedError);
-			}
-
-			// Focus editor unless click on toolbar
-			else if (this.getVisibleEditorCount() === 1 && !DOM.isAncestor(<any>e.target || e.srcElement, this.editorActionsToolbar[position].getContainer().getHTMLElement())) {
-				this.editorService.focusEditor(this.visibleEditors[position]).done(null, errors.onUnexpectedError);
-			}
-		});
-
-		// Right Actions Container
-		parent.div({
-			'class': 'title-actions'
-		}, (div) => {
-
-			// Toolbar
-			this.editorActionsToolbar[position] = new ToolBar(div.getHTMLElement(), this.contextMenuService, {
-				actionItemProvider: (action: Action) => this.actionItemProvider(action, position),
-				orientation: ActionsOrientation.HORIZONTAL
-			});
-
-			// Action Run Handling
-			this.editorActionsToolbar[position].actionRunner.addListener(BaseEventType.RUN, (e: any) => {
-
-				// Check for Error
-				if (e.error && !errors.isPromiseCanceledError(e.error)) {
-					this.messageService.show(Severity.Error, e.error);
-				}
-
-				// Log in telemetry
-				if (this.telemetryService) {
-					this.telemetryService.publicLog('workbenchActionExecuted', { id: e.action.id, from: 'editorPart' });
-				}
-			});
-		});
-
-		// Left Title Label (click opens quick open unless we are configured to ignore click or we are not the active title)
-		parent.div({
-			'class': 'title-label'
-		}, (div) => {
-			let clickHandler = (e: MouseEvent) => {
-				if (ignoreClick) {
-					return;
-				}
-
-				DOM.EventHelper.stop(e, true);
-
-				this.quickOpenService.show();
-			};
-
-			// Clickable label (focus editor and bring up quick open)
-			this.titleLabel[position] = $(div).a().on(DOM.EventType.CLICK, clickHandler);
-
-			// Subtle Description
-			this.titleDescription[position] = $(div).span().on(DOM.EventType.CLICK, clickHandler);
 		});
 	}
 
@@ -1142,93 +1270,12 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		return null;
 	}
 
-	private actionItemProvider(action: Action, position: Position): IActionItem {
-		let actionItem: IActionItem;
-
-		// Check Active Editor
-		let editor = this.visibleEditors[position];
-		if (editor) {
-			actionItem = editor.getActionItem(action);
-		}
-
-		// Check Registry
-		if (!actionItem) {
-			let actionBarRegistry = <IActionBarRegistry>Registry.as(Extensions.Actionbar);
-			actionItem = actionBarRegistry.getActionItemForContext(Scope.EDITOR, { input: editor && editor.input, editor: editor, position: position }, action);
-		}
-
-		return actionItem;
-	}
-
-	public setTitle(position: Position, input: EditorInput, primaryActions: IAction[], secondaryActions: IAction[], isActive: boolean): void {
-
-		// Activity class
-		if (isActive) {
-			this.containers[position].removeClass('inactive');
-			this.containers[position].addClass('active');
-		} else {
-			this.containers[position].addClass('inactive');
-			this.containers[position].removeClass('active');
-		}
-
-		// Editor Title (Label + Description)
-		let name = input.getName() || '';
-		let description = isActive ? (input.getDescription() || '') : '';
-		let verboseDescription = isActive ? (input.getDescription(true) || '') : '';
-		if (description === verboseDescription) {
-			verboseDescription = ''; // dont repeat what is already shown
-		}
-
-		this.titleLabel[position].safeInnerHtml(name);
-		this.titleLabel[position].title(verboseDescription);
-
-		this.titleDescription[position].safeInnerHtml(description);
-		this.titleDescription[position].title(verboseDescription);
-
-		// Editor Input State Description
-		if (input) {
-			this.setEditorInputStateIndicator(input, input.getStatus(), position);
-		} else {
-			this.setEditorInputStateIndicator(null, null, null);
-		}
-
-		// Support split editor action if visible editor count is < 3 and editor supports it
-		if (isActive && this.getVisibleEditorCount() < 3 && this.lastActiveEditor.supportsSplitEditor()) {
-			primaryActions.unshift(this.splitEditorAction);
-		}
-
-		// Set Primary/Secondary Actions
-		this.editorActionsToolbar[position].setActions(primaryActions, secondaryActions)();
-
-		// Add a close action
-		if (input) {
-			this.editorActionsToolbar[position].addPrimaryAction(this.closeEditorAction[position])();
-		}
-	}
-
-	public setLoading(position: Position, input: EditorInput): void {
-
-		// Editor Title and Description
-		this.titleLabel[position].safeInnerHtml(input.getName() || '');
-		this.titleDescription[position].safeInnerHtml(nls.localize('loadingLabel', "Loading..."));
-
-		// Clear Primary/Secondary Actions
-		this.editorActionsToolbar[position].setActions([], [])();
-
-		// Add a close action
-		if (input) {
-			this.editorActionsToolbar[position].addPrimaryAction(this.closeEditorAction[position])();
-		}
-	}
-
-	public clearTitle(position: Position): void {
-
-		// Editor Title
-		this.titleLabel[position].safeInnerHtml('');
-		this.titleDescription[position].safeInnerHtml('');
-
-		// Toolbar
-		this.editorActionsToolbar[position].setActions([], [])();
+	private centerSash(a: Position, b: Position): void {
+		let sumWidth = this.containerWidth[a] + this.containerWidth[b];
+		let meanWidth = sumWidth / 2;
+		this.containerWidth[a] = meanWidth;
+		this.containerWidth[b] = sumWidth - meanWidth;
+		this.layoutContainers();
 	}
 
 	private onLeftSashDragStart(): void {
@@ -1320,6 +1367,11 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		this.focusNextNonMinimized();
 	}
 
+	private onLeftSashReset(): void {
+		this.centerSash(Position.LEFT, Position.CENTER);
+		this.leftSash.layout();
+	}
+
 	private onRightSashDragStart(): void {
 		this.startRightContainerWidth = this.containerWidth[Position.RIGHT];
 	}
@@ -1377,6 +1429,11 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		this.focusNextNonMinimized();
 	}
 
+	private onRightSashReset(): void {
+		this.centerSash(Position.CENTER, Position.RIGHT);
+		this.rightSash.layout();
+	}
+
 	public getVerticalSashTop(sash: Sash): number {
 		return 0;
 	}
@@ -1416,7 +1473,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		let totalWidth = 0;
 
 		// Set preferred dimensions based on ratio to previous dimenions
-		POSITIONS.forEach((position) => {
+		POSITIONS.forEach(position => {
 			if (this.visibleEditors[position]) {
 
 				// Keep minimized editors in tact by not letting them grow if we have width to give
@@ -1465,7 +1522,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 
 			// We have width to take
 			else if (overflow > 0) {
-				POSITIONS.forEach((position) => {
+				POSITIONS.forEach(position => {
 					let maxCompensation = this.containerWidth[position] - SideBySideEditorControl.MIN_EDITOR_WIDTH;
 					if (maxCompensation >= overflow) {
 						this.containerWidth[position] -= overflow;
@@ -1490,7 +1547,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 	private layoutContainers(): void {
 
 		// Layout containers
-		POSITIONS.forEach((position) => {
+		POSITIONS.forEach(position => {
 			this.containers[position].size(this.containerWidth[position], this.dimension.height);
 		});
 
@@ -1502,7 +1559,7 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		}
 
 		// Visibility
-		POSITIONS.forEach((position) => {
+		POSITIONS.forEach(position => {
 			if (this.visibleEditors[position] && this.containers[position].isHidden()) {
 				this.containers[position].show();
 			} else if (!this.visibleEditors[position] && !this.containers[position].isHidden()) {
@@ -1510,9 +1567,14 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 			}
 		});
 
-		// Layout active editors
-		POSITIONS.forEach((position) => {
+		// Layout visible editors
+		POSITIONS.forEach(position => {
 			this.layoutEditor(position);
+		});
+
+		// Layout title controls
+		POSITIONS.forEach(position => {
+			this.titleAreaControl[position].layout();
 		});
 	}
 
@@ -1523,30 +1585,42 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 		}
 	}
 
+	public getInstantiationService(position: Position): IInstantiationService {
+		return this.instantiationServices[position];
+	}
+
 	public getProgressBar(position: Position): ProgressBar {
 		return this.progressBar[position];
 	}
 
+	public updateProgress(position: Position, state: ProgressState): void {
+		switch (state) {
+			case ProgressState.INFINITE:
+				this.progressBar[position].infinite().getContainer().show();
+				break;
+			case ProgressState.DONE:
+				this.progressBar[position].done().getContainer().hide();
+				break;
+			case ProgressState.STOP:
+				this.progressBar[position].stop().getContainer().hide();
+				break;
+		}
+	}
+
 	public dispose(): void {
+		dispose(this.toDispose);
 
 		// Positions
-		POSITIONS.forEach((position) => {
+		POSITIONS.forEach(position => {
 			this.clearPosition(position);
 		});
 
-		// Toolbars
-		this.editorActionsToolbar.forEach((toolbar) => {
-			toolbar.dispose();
-		});
+		// Title Area Control
+		this.titleAreaControl.forEach(c => c.dispose());
 
 		// Progress bars
 		this.progressBar.forEach((bar) => {
 			bar.dispose();
-		});
-
-		// Actions
-		this.closeEditorAction.forEach((action) => {
-			action.dispose();
 		});
 
 		// Sash
@@ -1558,19 +1632,11 @@ export class SideBySideEditorControl extends EventEmitter implements IVerticalSa
 			container.destroy();
 		});
 
-		if (this.globalFocusTracker) {
-			this.globalFocusTracker.dispose();
-		}
-
-		if (this.editorInputStateChangeListener) {
-			this.editorInputStateChangeListener();
-		}
-
 		this.lastActiveEditor = null;
 		this.lastActivePosition = null;
 		this.visibleEditors = null;
 		this.visibleEditorContainers = null;
 
-		super.dispose();
+		this._onGroupFocusChanged.dispose();
 	}
 }

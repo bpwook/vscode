@@ -5,25 +5,26 @@
 
 'use strict';
 
-import 'vs/css!./media/statusbarPart';
+import 'vs/css!./media/statusbarpart';
 import dom = require('vs/base/browser/dom');
 import types = require('vs/base/common/types');
 import nls = require('vs/nls');
 import {toErrorMessage} from 'vs/base/common/errors';
-import {Promise, TPromise} from 'vs/base/common/winjs.base';
-import {disposeAll, IDisposable} from 'vs/base/common/lifecycle';
+import {TPromise} from 'vs/base/common/winjs.base';
+import {dispose, IDisposable} from 'vs/base/common/lifecycle';
 import {Builder, $} from 'vs/base/browser/builder';
+import {OcticonLabel} from 'vs/base/browser/ui/octiconLabel/octiconLabel';
 import {Registry} from 'vs/platform/platform';
 import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
-import {IAction, Action} from 'vs/base/common/actions';
+import {IAction} from 'vs/base/common/actions';
 import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
 import {Part} from 'vs/workbench/browser/part';
-import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/browser/actionRegistry';
+import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/common/actionRegistry';
 import {StatusbarAlignment, IStatusbarRegistry, Extensions, IStatusbarItem} from 'vs/workbench/browser/parts/statusbar/statusbar';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
 import {IMessageService, Severity} from 'vs/platform/message/common/message';
-import {IStatusbarService, IStatusbarEntry} from 'vs/workbench/services/statusbar/statusbarService';
+import {IStatusbarService, IStatusbarEntry} from 'vs/platform/statusbar/common/statusbar';
 
 export class StatusbarPart extends Part implements IStatusbarService {
 
@@ -34,19 +35,15 @@ export class StatusbarPart extends Part implements IStatusbarService {
 
 	private toDispose: IDisposable[];
 	private statusItemsContainer: Builder;
-
-	private instantiationService: IInstantiationService;
+	private statusMsgDispose: IDisposable;
 
 	constructor(
-		id: string
+		id: string,
+		@IInstantiationService private instantiationService: IInstantiationService
 	) {
 		super(id);
 
 		this.toDispose = [];
-	}
-
-	public setInstantiationService(service: IInstantiationService): void {
-		this.instantiationService = service;
 	}
 
 	public addEntry(entry: IStatusbarEntry, alignment: StatusbarAlignment, priority: number = 0): IDisposable {
@@ -143,8 +140,46 @@ export class StatusbarPart extends Part implements IStatusbarService {
 		return el;
 	}
 
+	public setStatusMessage(message: string, autoDisposeAfter: number = -1, delayBy: number = 0): IDisposable {
+		if (this.statusMsgDispose) {
+			this.statusMsgDispose.dispose(); // dismiss any previous
+		}
+
+		// Create new
+		let statusDispose: IDisposable;
+		let showHandle = setTimeout(() => {
+			statusDispose = this.addEntry({ text: message }, StatusbarAlignment.LEFT, Number.MIN_VALUE);
+			showHandle = null;
+		}, delayBy);
+		let hideHandle: number;
+
+		// Dispose function takes care of timeouts and actual entry
+		const dispose = {
+			dispose: () => {
+				if (showHandle) {
+					clearTimeout(showHandle);
+				}
+
+				if (hideHandle) {
+					clearTimeout(hideHandle);
+				}
+
+				if (statusDispose) {
+					statusDispose.dispose();
+				}
+			}
+		};
+		this.statusMsgDispose = dispose;
+
+		if (typeof autoDisposeAfter === 'number' && autoDisposeAfter > 0) {
+			hideHandle = setTimeout(() => dispose.dispose(), autoDisposeAfter);
+		}
+
+		return dispose;
+	}
+
 	public dispose(): void {
-		this.toDispose = disposeAll(this.toDispose);
+		this.toDispose = dispose(this.toDispose);
 
 		super.dispose();
 	}
@@ -165,7 +200,7 @@ class StatusBarEntryItem implements IStatusbarItem {
 	}
 
 	public render(el: HTMLElement): IDisposable {
-		let toDispose: { (): void; }[] = [];
+		let toDispose: IDisposable[] = [];
 		dom.addClass(el, 'statusbar-entry');
 
 		// Text Container
@@ -178,54 +213,8 @@ class StatusBarEntryItem implements IStatusbarItem {
 			textContainer = document.createElement('span');
 		}
 
-		// Text Value with support for icons
-		// For example: '${zap} Power is ${zap} on'
-		let textBuffer = '';
-		let iconBuffer = '';
-		let inPlaceholder = false;
-		let text = this.entry.text || '';
-		for (let i = 0, len = text.length; i < len; i++) {
-
-			// Opening $(...
-			if (text[i] === '$' && text[i + 1] === '(') {
-				inPlaceholder = true;
-				i++; // unread the opening '('
-
-				continue;
-			}
-
-			if (inPlaceholder) {
-
-				// Closing ...)
-				if (text[i] === ')') {
-					if (textBuffer) {
-						textContainer.appendChild(document.createTextNode(textBuffer));
-						textBuffer = '';
-					}
-
-					let iconContainer = document.createElement('span');
-					dom.addClass(iconContainer, `octicon octicon-${iconBuffer}`);
-					textContainer.appendChild(iconContainer);
-
-					iconBuffer = '';
-					inPlaceholder = false;
-				}
-
-				// Icon value
-				else {
-					iconBuffer += text[i];
-				}
-			}
-
-			// Any normal text
-			else {
-				textBuffer += text[i];
-			}
-		}
-
-		if (textBuffer) {
-			textContainer.appendChild(document.createTextNode(textBuffer));
-		}
+		// Label
+		new OcticonLabel(textContainer).text = this.entry.text;
 
 		// Tooltip
 		if (this.entry.tooltip) {
@@ -241,9 +230,7 @@ class StatusBarEntryItem implements IStatusbarItem {
 
 		return {
 			dispose: () => {
-				while (toDispose.length) {
-					toDispose.pop()();
-				}
+				toDispose = dispose(toDispose);
 			}
 		};
 	}
@@ -275,7 +262,7 @@ class StatusBarEntryItem implements IStatusbarItem {
 		if (action) {
 			if (action.enabled) {
 				this.telemetryService.publicLog('workbenchActionExecuted', { id: action.id, from: 'status bar' });
-				(action.run() || Promise.as(null)).done(() => {
+				(action.run() || TPromise.as(null)).done(() => {
 					action.dispose();
 				}, (err) => this.messageService.show(Severity.Error, toErrorMessage(err)));
 			} else {
@@ -285,7 +272,7 @@ class StatusBarEntryItem implements IStatusbarItem {
 
 		// Fallback to the keybinding service for any other case
 		else {
-			this.keybindingService.executeCommand(id);
+			this.keybindingService.executeCommand(id).done(undefined, err => this.messageService.show(Severity.Error, toErrorMessage(err)));
 		}
 	}
 }

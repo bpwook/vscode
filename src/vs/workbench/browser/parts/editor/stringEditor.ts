@@ -9,34 +9,30 @@ import nls = require('vs/nls');
 import types = require('vs/base/common/types');
 import {ICodeEditor} from 'vs/editor/browser/editorBrowser';
 import {IEditorOptions, IEditorViewState} from 'vs/editor/common/editorCommon';
-import {DefaultConfig} from 'vs/editor/common/config/defaultConfig';
-import {EditorConfiguration} from 'vs/editor/common/config/commonEditorConfig';
 import {TextEditorOptions, EditorModel, EditorInput, EditorOptions} from 'vs/workbench/common/editor';
-import {BaseTextEditorModel} from 'vs/workbench/browser/parts/editor/textEditorModel';
-import {LogEditorInput} from 'vs/workbench/browser/parts/editor/logEditorInput';
-import {UntitledEditorInput} from 'vs/workbench/browser/parts/editor/untitledEditorInput';
+import {BaseTextEditorModel} from 'vs/workbench/common/editor/textEditorModel';
+import {UntitledEditorInput} from 'vs/workbench/common/editor/untitledEditorInput';
 import {BaseTextEditor} from 'vs/workbench/browser/parts/editor/textEditor';
-import {UntitledEditorEvent, EventType} from 'vs/workbench/browser/events';
+import {UntitledEditorEvent, EventType} from 'vs/workbench/common/events';
 import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
 import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
 import {IStorageService} from 'vs/platform/storage/common/storage';
-import {IConfigurationService, IConfigurationServiceEvent, ConfigurationServiceEventTypes} from 'vs/platform/configuration/common/configuration';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
 import {IEventService} from 'vs/platform/event/common/event';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IMessageService} from 'vs/platform/message/common/message';
 import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
 import {IModeService} from 'vs/editor/common/services/modeService';
+import {IThemeService} from 'vs/workbench/services/themes/common/themeService';
 
 /**
  * An editor implementation that is capable of showing string inputs or promise inputs that resolve to a string.
- * Uses the Monaco TextEditor widget to show the contents.
+ * Uses the TextEditor widget to show the contents.
  */
 export class StringEditor extends BaseTextEditor {
 
 	public static ID = 'workbench.editors.stringEditor';
 
-	private defaultWrappingColumn: number;
-	private defaultLineNumbers: boolean;
 	private mapResourceToEditorViewState: { [resource: string]: IEditorViewState; };
 
 	constructor(
@@ -48,20 +44,17 @@ export class StringEditor extends BaseTextEditor {
 		@IConfigurationService configurationService: IConfigurationService,
 		@IEventService eventService: IEventService,
 		@IWorkbenchEditorService editorService: IWorkbenchEditorService,
-		@IModeService modeService: IModeService
+		@IModeService modeService: IModeService,
+		@IThemeService themeService: IThemeService
 	) {
-
-		super(StringEditor.ID, telemetryService, instantiationService, contextService, storageService, messageService, configurationService, eventService, editorService, modeService);
-
-		this.defaultWrappingColumn = DefaultConfig.editor.wrappingColumn;
-		this.defaultLineNumbers = DefaultConfig.editor.lineNumbers;
+		super(StringEditor.ID, telemetryService, instantiationService, contextService, storageService, messageService, configurationService, eventService, editorService, modeService, themeService);
 
 		this.mapResourceToEditorViewState = Object.create(null);
 
-		this.toUnbind.push(this.eventService.addListener(EventType.UNTITLED_FILE_DELETED, (e: UntitledEditorEvent) => this.onUntitledDeletedEvent(e)));
+		this.toUnbind.push(this.eventService.addListener2(EventType.UNTITLED_FILE_SAVED, (e: UntitledEditorEvent) => this.onUntitledSavedEvent(e)));
 	}
 
-	private onUntitledDeletedEvent(e: UntitledEditorEvent): void {
+	private onUntitledSavedEvent(e: UntitledEditorEvent): void {
 		delete this.mapResourceToEditorViewState[e.resource.toString()];
 	}
 
@@ -132,42 +125,27 @@ export class StringEditor extends BaseTextEditor {
 
 			// Apply options again because input has changed
 			textEditor.updateOptions(this.getCodeEditorOptions());
-
-			// Auto reveal last line for log editors
-			if (input instanceof LogEditorInput) {
-				this.revealLastLine();
-			}
 		});
-	}
-
-	protected applyConfiguration(configuration: any): void {
-
-		// Remember some settings that we overwrite from #getCodeEditorOptions()
-		let editorConfig = configuration && configuration[EditorConfiguration.EDITOR_SECTION];
-		if (editorConfig) {
-			this.defaultWrappingColumn = editorConfig.wrappingColumn;
-			this.defaultLineNumbers = editorConfig.lineNumbers;
-		}
-
-		super.applyConfiguration(configuration);
 	}
 
 	protected getCodeEditorOptions(): IEditorOptions {
 		let options = super.getCodeEditorOptions();
 
 		let input = this.getInput();
-		let isLog = input instanceof LogEditorInput;
 		let isUntitled = input instanceof UntitledEditorInput;
+		let isReadonly = !isUntitled; // all string editors are readonly except for the untitled one
 
-		options.readOnly = !isUntitled; 				// all string editors are readonly except for the untitled one
+		options.readOnly = isReadonly;
 
-		if (isLog) {
-			options.wrappingColumn = 0;					// all log editors wrap
-			options.lineNumbers = false;				// all log editors hide line numbers
+		let ariaLabel: string;
+		let inputName = input && input.getName();
+		if (isReadonly) {
+			ariaLabel = inputName ? nls.localize('readonlyEditorWithInputAriaLabel', "{0}. Readonly text editor.", inputName) : nls.localize('readonlyEditorAriaLabel', "Readonly text editor.");
 		} else {
-			options.wrappingColumn = this.defaultWrappingColumn; 	// otherwise make sure to restore the defaults
-			options.lineNumbers = this.defaultLineNumbers; 			// otherwise make sure to restore the defaults
+			ariaLabel = inputName ? nls.localize('untitledFileEditorWithInputAriaLabel', "{0}. Untitled file text editor.", inputName) : nls.localize('untitledFileEditorAriaLabel', "Untitled file text editor.");
 		}
+
+		options.ariaLabel = ariaLabel;
 
 		return options;
 	}
@@ -181,19 +159,6 @@ export class StringEditor extends BaseTextEditor {
 		if (model) {
 			let lastLine = model.getLineCount();
 			codeEditor.revealLine(lastLine);
-		}
-	}
-
-	public supportsSplitEditor(): boolean {
-		return true;
-	}
-
-	public focus(): void {
-		super.focus();
-
-		// Auto reveal last line for log editors
-		if (this.getInput() instanceof LogEditorInput) {
-			this.revealLastLine();
 		}
 	}
 

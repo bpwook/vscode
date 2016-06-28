@@ -4,20 +4,25 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import nls = require('vs/nls');
-import {TPromise, Promise} from 'vs/base/common/winjs.base';
+import {TPromise} from 'vs/base/common/winjs.base';
 import URI from 'vs/base/common/uri';
-import paths = require('vs/base/common/paths');
+import errors = require('vs/base/common/errors');
+import Event, {Emitter} from 'vs/base/common/event';
 import {FileEditorInput} from 'vs/workbench/parts/files/browser/editors/fileEditorInput';
-import {CACHE, TextFileEditorModel} from 'vs/workbench/parts/files/browser/editors/textFileEditorModel';
-import {IResult, ITextFileOperationResult, ConfirmResult, ITextFileService} from 'vs/workbench/parts/files/common/files';
-import {EventType} from 'vs/workbench/browser/events';
-import {WorkingFilesModel} from 'vs/workbench/parts/files/browser/workingFilesModel';
+import {CACHE, TextFileEditorModel} from 'vs/workbench/parts/files/common/editors/textFileEditorModel';
+import {IResult, ITextFileOperationResult, ITextFileService, IRawTextContent, IAutoSaveConfiguration, AutoSaveMode} from 'vs/workbench/parts/files/common/files';
+import {ConfirmResult} from 'vs/workbench/common/editor';
 import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
-import {IFileOperationResult, FileOperationResult} from 'vs/platform/files/common/files';
-import {IEventService} from 'vs/platform/event/common/event';
+import {IFileService, IResolveContentOptions, IFilesConfiguration, IFileOperationResult, FileOperationResult, AutoSaveConfiguration} from 'vs/platform/files/common/files';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
-import {ILifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
+import {IEventService} from 'vs/platform/event/common/event';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
+import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
+import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
+import {ModelBuilder} from 'vs/editor/node/model/modelBuilder';
+import {IModelService} from 'vs/editor/common/services/modelService';
 
 /**
  * The workbench file service implementation implements the raw file service spec and adds additional methods on top.
@@ -25,36 +30,110 @@ import {ILifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
  * It also adds diagnostics and logging around file system operations.
  */
 export abstract class TextFileService implements ITextFileService {
+
 	public serviceId = ITextFileService;
 
-	private listenerToUnbind: () => void;
-	private workingFilesModel: WorkingFilesModel;
+	private listenerToUnbind: IDisposable[];
+
+	private _onAutoSaveConfigurationChange: Emitter<IAutoSaveConfiguration>;
+
+	private configuredAutoSaveDelay: number;
+	private configuredAutoSaveOnFocusChange: boolean;
 
 	constructor(
-		@IEventService private eventService: IEventService,
 		@IWorkspaceContextService protected contextService: IWorkspaceContextService,
-		@IInstantiationService instantiationService: IInstantiationService,
-		@ILifecycleService private lifecycleService: ILifecycleService
+		@IInstantiationService private instantiationService: IInstantiationService,
+		@IConfigurationService private configurationService: IConfigurationService,
+		@ITelemetryService private telemetryService: ITelemetryService,
+		@IWorkbenchEditorService protected editorService: IWorkbenchEditorService,
+		@IEditorGroupService private editorGroupService: IEditorGroupService,
+		@IEventService private eventService: IEventService,
+		@IFileService protected fileService: IFileService,
+		@IModelService private modelService: IModelService
 	) {
-		this.workingFilesModel = instantiationService.createInstance(WorkingFilesModel);
-
-		this.registerListeners();
+		this.listenerToUnbind = [];
+		this._onAutoSaveConfigurationChange = new Emitter<IAutoSaveConfiguration>();
 	}
 
-	private registerListeners(): void {
-		this.listenerToUnbind = this.eventService.addListener(EventType.WORKBENCH_OPTIONS_CHANGED, () => this.onOptionsChanged());
-		if (this.lifecycleService) {
-			this.lifecycleService.addBeforeShutdownParticipant(this);
-			this.lifecycleService.onShutdown.add(this.dispose, this);
+	protected init(): void {
+		this.registerListeners();
+
+		const configuration = this.configurationService.getConfiguration<IFilesConfiguration>();
+		this.onConfigurationChange(configuration);
+
+		this.telemetryService.publicLog('autoSave', this.getAutoSaveConfiguration());
+	}
+
+	public resolveTextContent(resource: URI, options?: IResolveContentOptions): TPromise<IRawTextContent> {
+		return this.fileService.resolveStreamContent(resource, options).then((streamContent) => {
+			return ModelBuilder.fromStringStream(streamContent.value, this.modelService.getCreationOptions()).then((res) => {
+				let r: IRawTextContent = {
+					resource: streamContent.resource,
+					name: streamContent.name,
+					mtime: streamContent.mtime,
+					etag: streamContent.etag,
+					mime: streamContent.mime,
+					encoding: streamContent.encoding,
+					value: res.rawText,
+					valueLogicalHash: res.hash
+				};
+				return r;
+			});
+		});
+	}
+
+	public get onAutoSaveConfigurationChange(): Event<IAutoSaveConfiguration> {
+		return this._onAutoSaveConfigurationChange.event;
+	}
+
+	protected registerListeners(): void {
+
+		// Configuration changes
+		this.listenerToUnbind.push(this.configurationService.onDidUpdateConfiguration(e => this.onConfigurationChange(e.config)));
+
+		// Editor focus change
+		window.addEventListener('blur', () => this.onEditorsChanged(), true);
+		this.listenerToUnbind.push(this.editorGroupService.onEditorsChanged(() => this.onEditorsChanged()));
+	}
+
+	private onEditorsChanged(): void {
+		if (this.configuredAutoSaveOnFocusChange && this.getDirty().length) {
+			this.saveAll().done(null, errors.onUnexpectedError); // save dirty files when we change focus in the editor area
 		}
 	}
 
-	protected onOptionsChanged(): void {
-		CACHE.getAll().forEach((model) => model.updateOptions());
+	private onConfigurationChange(configuration: IFilesConfiguration): void {
+		const wasAutoSaveEnabled = (this.getAutoSaveMode() !== AutoSaveMode.OFF);
+
+		const autoSaveMode = (configuration && configuration.files && configuration.files.autoSave) || AutoSaveConfiguration.OFF;
+		switch (autoSaveMode) {
+			case AutoSaveConfiguration.AFTER_DELAY:
+				this.configuredAutoSaveDelay = configuration && configuration.files && configuration.files.autoSaveDelay;
+				this.configuredAutoSaveOnFocusChange = false;
+				break;
+
+			case AutoSaveConfiguration.ON_FOCUS_CHANGE:
+				this.configuredAutoSaveDelay = void 0;
+				this.configuredAutoSaveOnFocusChange = true;
+				break;
+
+			default:
+				this.configuredAutoSaveDelay = void 0;
+				this.configuredAutoSaveOnFocusChange = false;
+				break;
+		}
+
+		// Emit as event
+		this._onAutoSaveConfigurationChange.fire(this.getAutoSaveConfiguration());
+
+		// save all dirty when enabling auto save
+		if (!wasAutoSaveEnabled && this.getAutoSaveMode() !== AutoSaveMode.OFF) {
+			this.saveAll().done(null, errors.onUnexpectedError);
+		}
 	}
 
-	public getDirty(resource?: URI): URI[] {
-		return this.getDirtyFileModels(resource).map((m) => m.getResource());
+	public getDirty(resources?: URI[]): URI[] {
+		return this.getDirtyFileModels(resources).map((m) => m.getResource());
 	}
 
 	public isDirty(resource?: URI): boolean {
@@ -77,7 +156,7 @@ export abstract class TextFileService implements ITextFileService {
 			};
 		});
 
-		return Promise.join(dirtyFileModels.map((model) => {
+		return TPromise.join(dirtyFileModels.map((model) => {
 			return model.save().then(() => {
 				if (!model.isDirty()) {
 					mapResourceToResult[model.getResource().toString()].success = true;
@@ -113,7 +192,7 @@ export abstract class TextFileService implements ITextFileService {
 
 	public abstract saveAs(resource: URI, targetResource?: URI): TPromise<URI>;
 
-	public confirmSave(resource?: URI): ConfirmResult {
+	public confirmSave(resources?: URI[]): ConfirmResult {
 		throw new Error('Unsupported');
 	}
 
@@ -131,20 +210,22 @@ export abstract class TextFileService implements ITextFileService {
 			};
 		});
 
-		return Promise.join(fileModels.map((model) => {
+		return TPromise.join(fileModels.map((model) => {
 			return model.revert().then(() => {
 				if (!model.isDirty()) {
 					mapResourceToResult[model.getResource().toString()].success = true;
 				}
 			}, (error) => {
 
-				// FileNotFound means the file got deleted meanwhile, so dispose this model
+				// FileNotFound means the file got deleted meanwhile, so dispose
 				if ((<IFileOperationResult>error).fileOperationResult === FileOperationResult.FILE_NOT_FOUND) {
-					let clients = FileEditorInput.getAll(model.getResource());
-					clients.forEach((input) => input.dispose(true));
 
-					// also make sure to have it removed from any working files
-					this.workingFilesModel.removeEntry(model.getResource());
+					// Inputs
+					let clients = FileEditorInput.getAll(model.getResource());
+					clients.forEach(input => input.dispose());
+
+					// Model
+					CACHE.dispose(model.getResource());
 
 					// store as successful revert
 					mapResourceToResult[model.getResource().toString()].success = true;
@@ -152,7 +233,7 @@ export abstract class TextFileService implements ITextFileService {
 
 				// Otherwise bubble up the error
 				else {
-					return Promise.wrapError(error);
+					return TPromise.wrapError(error);
 				}
 			});
 		})).then((r) => {
@@ -162,22 +243,27 @@ export abstract class TextFileService implements ITextFileService {
 		});
 	}
 
-	public beforeShutdown(): boolean | TPromise<boolean> {
+	public getAutoSaveMode(): AutoSaveMode {
+		if (this.configuredAutoSaveOnFocusChange) {
+			return AutoSaveMode.ON_FOCUS_CHANGE;
+		}
 
-		// Propagate to working files model
-		this.workingFilesModel.shutdown();
+		if (this.configuredAutoSaveDelay && this.configuredAutoSaveDelay > 0) {
+			return this.configuredAutoSaveDelay <= 1000 ? AutoSaveMode.AFTER_SHORT_DELAY : AutoSaveMode.AFTER_LONG_DELAY;
+		}
 
-		return false; // no veto
+		return AutoSaveMode.OFF;
 	}
 
-	public getWorkingFilesModel(): WorkingFilesModel {
-		return this.workingFilesModel;
+	public getAutoSaveConfiguration(): IAutoSaveConfiguration {
+		return {
+			autoSaveDelay: this.configuredAutoSaveDelay && this.configuredAutoSaveDelay > 0 ? this.configuredAutoSaveDelay : void 0,
+			autoSaveFocusChange: this.configuredAutoSaveOnFocusChange
+		};
 	}
 
 	public dispose(): void {
-		this.listenerToUnbind();
-
-		this.workingFilesModel.dispose();
+		this.listenerToUnbind = dispose(this.listenerToUnbind);
 
 		// Clear all caches
 		CACHE.clear();

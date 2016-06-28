@@ -11,12 +11,23 @@ import { IEventEmitter } from 'vs/base/common/eventEmitter';
 
 import { ProblemMatcher } from 'vs/platform/markers/common/problemMatcher';
 
-export class TaskError {
-	public severity:Severity;
-	public message:string;
-	public code:number;
+export enum TaskErrors {
+	NotConfigured,
+	RunningTask,
+	NoBuildTask,
+	NoTestTask,
+	ConfigValidationError,
+	TaskNotFound,
+	NoValidTaskRunner,
+	UnknownError
+}
 
-	constructor(severity:Severity, message:string, code:number = -1) {
+export class TaskError {
+	public severity: Severity;
+	public message: string;
+	public code: TaskErrors;
+
+	constructor(severity: Severity, message: string, code: TaskErrors) {
 		this.severity = severity;
 		this.message = message;
 		this.code = code;
@@ -90,6 +101,11 @@ export interface TaskDescription {
 	 * Whether the task is running in watching mode or not.
 	 */
 	isWatching?: boolean;
+
+	/**
+	 * Whether the task should prompt on close for confirmation if running.
+	 */
+	promptOnClose?: boolean;
 
 	/**
 	 * Controls whether the output of the running tasks is shown or not. Default
@@ -166,11 +182,15 @@ export interface TaskRunnerConfiguration extends BaseTaskRunnerConfiguration {
 }
 
 export interface ITaskSummary {
+	/**
+	 * Exit code of the process.
+	 */
+	exitCode?: number;
 }
 
 export interface ITaskRunResult {
 	restartOnFileChanges?: string;
-	promise: TPromise<ITaskSummary>
+	promise: TPromise<ITaskSummary>;
 }
 
 export namespace TaskSystemEvents {
@@ -197,6 +217,7 @@ export interface ITaskSystem extends IEventEmitter {
 	run(taskIdentifier: string): ITaskRunResult;
 	isActive(): TPromise<boolean>;
 	isActiveSync(): boolean;
+	canAutoTerminate(): boolean;
 	terminate(): TPromise<TerminateResponse>;
 	tasks(): TPromise<TaskDescription[]>;
 }

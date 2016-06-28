@@ -4,25 +4,25 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
-import supports = require('vs/editor/common/modes/supports');
+import modes = require('vs/editor/common/modes');
 import htmlMode = require('vs/languages/html/common/html');
 import csharpTokenization = require('vs/languages/razor/common/csharpTokenization');
-import {AbstractMode, createWordRegExp} from 'vs/editor/common/modes/abstractMode';
-import {AsyncDescriptor2, createAsyncDescriptor2} from 'vs/platform/instantiation/common/descriptors';
-import {OnEnterSupport} from 'vs/editor/common/modes/supports/onEnter';
+import {createWordRegExp, ModeWorkerManager} from 'vs/editor/common/modes/abstractMode';
 import razorTokenTypes = require('vs/languages/razor/common/razorTokenTypes');
 import {RAZORWorker} from 'vs/languages/razor/common/razorWorker';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
-import {IThreadService} from 'vs/platform/thread/common/thread';
 import {IModeService} from 'vs/editor/common/services/modeService';
+import {LanguageConfigurationRegistry, LanguageConfiguration} from 'vs/editor/common/modes/languageConfigurationRegistry';
+import {ILeavingNestedModeData} from 'vs/editor/common/modes/supports/tokenizationSupport';
+import {wireCancellationToken} from 'vs/base/common/async';
+import {ICompatWorkerService} from 'vs/editor/common/services/compatWorkerService';
+import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
 
 // for a brief description of the razor syntax see http://www.mikesdotnetting.com/Article/153/Inline-Razor-Syntax-Overview
 
 class RAZORState extends htmlMode.State {
 
-	constructor(mode:Modes.IMode, kind:htmlMode.States, lastTagName:string, lastAttributeName:string, embeddedContentType:string, attributeValueQuote:string, attributeValue:string) {
+	constructor(mode:modes.IMode, kind:htmlMode.States, lastTagName:string, lastAttributeName:string, embeddedContentType:string, attributeValueQuote:string, attributeValue:string) {
 		super(mode, kind, lastTagName, lastAttributeName, embeddedContentType, attributeValueQuote, attributeValue);
 	}
 
@@ -30,7 +30,7 @@ class RAZORState extends htmlMode.State {
 		return new RAZORState(this.getMode(), this.kind, this.lastTagName, this.lastAttributeName, this.embeddedContentType, this.attributeValueQuote, this.attributeValue);
 	}
 
-	public equals(other:Modes.IState):boolean {
+	public equals(other:modes.IState):boolean {
 		if (other instanceof RAZORState) {
 			return (
 				super.equals(other)
@@ -39,7 +39,7 @@ class RAZORState extends htmlMode.State {
 		return false;
 	}
 
-	public tokenize(stream:Modes.IStream):Modes.ITokenizationResult {
+	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
 
 		if (!stream.eos() && stream.peek() === '@') {
 			stream.next();
@@ -57,39 +57,91 @@ class RAZORState extends htmlMode.State {
 
 export class RAZORMode extends htmlMode.HTMLMode<RAZORWorker> {
 
+	public static LANG_CONFIG:LanguageConfiguration = {
+		wordPattern: createWordRegExp('#?%'),
+
+		comments: {
+			blockComment: ['<!--', '-->']
+		},
+
+		brackets: [
+			['<!--', '-->'],
+			['{', '}'],
+			['(', ')']
+		],
+
+		__electricCharacterSupport: {
+			embeddedElectricCharacters: ['*', '}', ']', ')']
+		},
+
+		autoClosingPairs: [
+			{ open: '{', close: '}' },
+			{ open: '[', close: ']' },
+			{ open: '(', close: ')' },
+			{ open: '"', close: '"' },
+			{ open: '\'', close: '\'' }
+		],
+		surroundingPairs: [
+			{ open: '"', close: '"' },
+			{ open: '\'', close: '\'' }
+		],
+
+		onEnterRules: [
+			{
+				beforeText: new RegExp(`<(?!(?:${htmlMode.EMPTY_ELEMENTS.join('|')}))(\\w[\\w\\d]*)([^/>]*(?!/)>)[^<]*$`, 'i'),
+				afterText: /^<\/(\w[\w\d]*)\s*>$/i,
+				action: { indentAction: modes.IndentAction.IndentOutdent }
+			},
+			{
+				beforeText: new RegExp(`<(?!(?:${htmlMode.EMPTY_ELEMENTS.join('|')}))(\\w[\\w\\d]*)([^/>]*(?!/)>)[^<]*$`, 'i'),
+				action: { indentAction: modes.IndentAction.Indent }
+			}
+		],
+	};
+
 	constructor(
-		descriptor:Modes.IModeDescriptor,
+		descriptor:modes.IModeDescriptor,
 		@IInstantiationService instantiationService: IInstantiationService,
-		@IThreadService threadService: IThreadService,
-		@IModeService modeService: IModeService
+		@IModeService modeService: IModeService,
+		@ICompatWorkerService compatWorkerService: ICompatWorkerService,
+		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService
 	) {
-		super(descriptor, instantiationService, threadService, modeService);
-
-		this.formattingSupport = null;
-
-		this.onEnterSupport = new OnEnterSupport(this.getId(), {
-			brackets: [
-				{ open: '<!--', close: '-->' },
-				{ open: '{', close: '}' },
-				{ open: '(', close: ')' },
-			]
-		});
+		super(descriptor, instantiationService, modeService, compatWorkerService, workspaceContextService);
 	}
 
-	protected _getWorkerDescriptor(): AsyncDescriptor2<Modes.IMode, Modes.IWorkerParticipant[], RAZORWorker> {
-		return createAsyncDescriptor2('vs/languages/razor/common/razorWorker', 'RAZORWorker');
+	protected _registerSupports(): void {
+		modes.SuggestRegistry.register(this.getId(), {
+			triggerCharacters: ['.', ':', '<', '"', '=', '/'],
+			shouldAutotriggerSuggest: true,
+			provideCompletionItems: (model, position, token): Thenable<modes.ISuggestResult[]> => {
+				return wireCancellationToken(token, this._provideCompletionItems(model.uri, position));
+			}
+		}, true);
+
+		modes.DocumentHighlightProviderRegistry.register(this.getId(), {
+			provideDocumentHighlights: (model, position, token): Thenable<modes.DocumentHighlight[]> => {
+				return wireCancellationToken(token, this._provideDocumentHighlights(model.uri, position));
+			}
+		}, true);
+
+		modes.LinkProviderRegistry.register(this.getId(), {
+			provideLinks: (model, token): Thenable<modes.ILink[]> => {
+				return wireCancellationToken(token, this.provideLinks(model.uri));
+			}
+		}, true);
+
+		LanguageConfigurationRegistry.register(this.getId(), RAZORMode.LANG_CONFIG);
 	}
 
-	public getInitialState(): Modes.IState {
+	protected _createModeWorkerManager(descriptor:modes.IModeDescriptor, instantiationService: IInstantiationService): ModeWorkerManager<RAZORWorker> {
+		return new ModeWorkerManager<RAZORWorker>(descriptor, 'vs/languages/razor/common/razorWorker', 'RAZORWorker', 'vs/languages/html/common/htmlWorker', instantiationService);
+	}
+
+	public getInitialState(): modes.IState {
 		return new RAZORState(this, htmlMode.States.Content, '', '', '', '', '');
 	}
 
-	public static WORD_DEFINITION = createWordRegExp('#?%');
-	public getWordDefinition():RegExp {
-		return RAZORMode.WORD_DEFINITION;
-	}
-
-	public getLeavingNestedModeData(line:string, state:Modes.IState): supports.ILeavingNestedModeData {
+	public getLeavingNestedModeData(line:string, state:modes.IState): ILeavingNestedModeData {
 		var leavingNestedModeData = super.getLeavingNestedModeData(line, state);
 		if (leavingNestedModeData) {
 			leavingNestedModeData.stateAfterNestedMode = new RAZORState(this, htmlMode.States.Content, '', '', '', '', '');
@@ -97,4 +149,3 @@ export class RAZORMode extends htmlMode.HTMLMode<RAZORWorker> {
 		return leavingNestedModeData;
 	}
 }
-

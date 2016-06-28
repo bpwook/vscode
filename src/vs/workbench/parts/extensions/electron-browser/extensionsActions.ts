@@ -3,28 +3,253 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import nls = require('vs/nls');
-import { Promise } from 'vs/base/common/winjs.base';
+import 'vs/css!./media/extensionActions';
+import { localize } from 'vs/nls';
+import { TPromise } from 'vs/base/common/winjs.base';
 import { Action } from 'vs/base/common/actions';
-import { IExtensionsService } from 'vs/workbench/parts/extensions/common/extensions';
-import { IQuickOpenService } from 'vs/workbench/services/quickopen/browser/quickOpenService';
+import { IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { ReloadWindowAction } from 'vs/workbench/electron-browser/actions';
+import { IExtension, ExtensionState, IExtensionsWorkbenchService, VIEWLET_ID, IExtensionsViewlet } from './extensions';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { ToggleViewletAction } from 'vs/workbench/browser/viewlet';
+import { IViewletService } from 'vs/workbench/services/viewlet/common/viewletService';
+import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
 
-export class ListExtensionsAction extends Action {
+export class InstallAction extends Action {
 
-	static ID = 'workbench.extensions.action.listExtensions';
-	static LABEL = nls.localize('showInstalledExtensions', "Show Installed Extensions");
+	private static InstallLabel = localize('installAction', "Install");
+	private static InstallingLabel = localize('installing', "Installing");
+	private disposables: IDisposable[] = [];
+
+	constructor(
+		private extension: IExtension,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService
+	) {
+		super('extensions.install', InstallAction.InstallLabel, 'extension-action install', false);
+
+		this.disposables.push(this.extensionsWorkbenchService.onChange(() => this.update()));
+		this.update();
+	}
+
+	private update(): void {
+		this.enabled = this.extensionsWorkbenchService.canInstall(this.extension) && this.extension.state === ExtensionState.Uninstalled;
+		this.label = this.extension.state === ExtensionState.Installing ? InstallAction.InstallingLabel : InstallAction.InstallLabel;
+	}
+
+	run(): TPromise<any> {
+		return this.extensionsWorkbenchService.install(this.extension);
+	}
+
+	dispose(): void {
+		super.dispose();
+		this.disposables = dispose(this.disposables);
+	}
+}
+
+export class UninstallAction extends Action {
+
+	private disposables: IDisposable[] = [];
+
+	constructor(
+		private extension: IExtension,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService
+	) {
+		super('extensions.uninstall', localize('uninstall', "Uninstall"), 'extension-action uninstall', false);
+
+		this.disposables.push(this.extensionsWorkbenchService.onChange(() => this.updateEnablement()));
+		this.updateEnablement();
+	}
+
+	private updateEnablement(): void {
+		this.enabled = this.extension.state === ExtensionState.Installed
+			|| this.extension.state === ExtensionState.NeedsRestart;
+	}
+
+	run(): TPromise<any> {
+		if (!window.confirm(localize('deleteSure', "Are you sure you want to uninstall '{0}'?", this.extension.displayName))) {
+			return TPromise.as(null);
+		}
+
+		return this.extensionsWorkbenchService.uninstall(this.extension);
+	}
+
+	dispose(): void {
+		super.dispose();
+		this.disposables = dispose(this.disposables);
+	}
+}
+
+export class CombinedInstallAction extends Action {
+
+	private installAction: InstallAction;
+	private uninstallAction: UninstallAction;
+	private disposables: IDisposable[] = [];
+
+	constructor(
+		private extension: IExtension,
+		@IInstantiationService instantiationService: IInstantiationService
+	) {
+		super('extensions.combinedInstall', '', '', false);
+
+		this.installAction = instantiationService.createInstance(InstallAction, extension);
+		this.uninstallAction = instantiationService.createInstance(UninstallAction, extension);
+		this.disposables.push(this.installAction, this.uninstallAction);
+
+		this.disposables.push(this.installAction.addListener2(Action.ENABLED, () => this.update()));
+		this.disposables.push(this.installAction.addListener2(Action.LABEL, () => this.update()));
+		this.disposables.push(this.uninstallAction.addListener2(Action.ENABLED, () => this.update()));
+		this.update();
+	}
+
+	private update(): void {
+		if (this.installAction.enabled) {
+			this.enabled = true;
+			this.label = this.installAction.label;
+			this.class = this.installAction.class;
+		} else if (this.uninstallAction.enabled) {
+			this.enabled = true;
+			this.label = this.uninstallAction.label;
+			this.class = this.uninstallAction.class;
+		} else if (this.extension.state === ExtensionState.Installing) {
+			this.enabled = false;
+			this.label = this.installAction.label;
+			this.class = this.installAction.class;
+		} else {
+			this.enabled = false;
+		}
+	}
+
+	run(): TPromise<any> {
+		if (this.installAction.enabled) {
+			return this.installAction.run();
+		} else if (this.uninstallAction.enabled) {
+			return this.uninstallAction.run();
+		}
+
+		return TPromise.as(null);
+	}
+
+	dispose(): void {
+		super.dispose();
+		this.disposables = dispose(this.disposables);
+	}
+}
+
+export class UpdateAction extends Action {
+
+	private static EnabledClass = 'extension-action update';
+	private static DisabledClass = `${ UpdateAction.EnabledClass } disabled`;
+
+	private disposables: IDisposable[] = [];
+
+	constructor(
+		private extension: IExtension,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService
+	) {
+		super('extensions.update', localize('updateAction', "Update"), UpdateAction.DisabledClass, false);
+
+		this.disposables.push(this.extensionsWorkbenchService.onChange(() => this.updateEnablement()));
+		this.updateEnablement();
+	}
+
+	private updateEnablement(): void {
+		const canInstall = this.extensionsWorkbenchService.canInstall(this.extension);
+		const isInstalled = this.extension.state === ExtensionState.Installed
+			|| this.extension.state === ExtensionState.NeedsRestart;
+
+		this.enabled = canInstall && isInstalled && this.extension.outdated;
+		this.class = this.enabled ? UpdateAction.EnabledClass : UpdateAction.DisabledClass;
+	}
+
+	run(): TPromise<any> {
+		return this.extensionsWorkbenchService.install(this.extension);
+	}
+
+	dispose(): void {
+		super.dispose();
+		this.disposables = dispose(this.disposables);
+	}
+}
+
+export class EnableAction extends Action {
+
+	private static EnabledClass = 'extension-action enable';
+	private static DisabledClass = `${ EnableAction.EnabledClass } disabled`;
+
+	private disposables: IDisposable[] = [];
+
+	constructor(
+		private extension: IExtension,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService,
+		@IInstantiationService private instantiationService: IInstantiationService
+	) {
+		super('extensions.enable', localize('enableAction', "Enable"), EnableAction.DisabledClass, false);
+
+		this.disposables.push(this.extensionsWorkbenchService.onChange(() => this.updateEnablement()));
+		this.updateEnablement();
+	}
+
+	private updateEnablement(): void {
+		this.enabled = this.extension.state === ExtensionState.NeedsRestart;
+		this.class = this.enabled ? EnableAction.EnabledClass : EnableAction.DisabledClass;
+	}
+
+	run(): TPromise<any> {
+		if (!window.confirm(localize('restart', "In order to enable this extension, this window of VS Code needs to be restarted.\n\nDo you want to continue?"))) {
+			return TPromise.as(null);
+		}
+
+		const action = this.instantiationService.createInstance(ReloadWindowAction, ReloadWindowAction.ID, localize('restartNow', "Restart Now"));
+		return action.run();
+	}
+
+	dispose(): void {
+		super.dispose();
+		this.disposables = dispose(this.disposables);
+	}
+}
+
+export class OpenExtensionsViewletAction extends ToggleViewletAction {
+
+	static ID = VIEWLET_ID;
+	static LABEL = localize('toggleExtensionsViewlet', "Show Extensions");
 
 	constructor(
 		id: string,
 		label: string,
-		@IExtensionsService private extensionsService: IExtensionsService,
-		@IQuickOpenService private quickOpenService: IQuickOpenService
+		@IViewletService viewletService: IViewletService,
+		@IWorkbenchEditorService editorService: IWorkbenchEditorService
+	) {
+		super(id, label, VIEWLET_ID, viewletService, editorService);
+	}
+}
+
+export class InstallExtensionsAction extends OpenExtensionsViewletAction {
+	static ID = 'workbench.extensions.action.installExtensions';
+	static LABEL = localize('installExtensions', "Install Extensions");
+}
+
+export class ListOutdatedExtensionsAction extends Action {
+
+	static ID = 'workbench.extensions.action.listOutdatedExtensions';
+	static LABEL = localize('showOutdatedExtensions', "Show Outdated Extensions");
+
+	constructor(
+		id: string,
+		label: string,
+		@IViewletService private viewletService: IViewletService
 	) {
 		super(id, label, null, true);
 	}
 
-	public run(): Promise {
-		return this.quickOpenService.show('ext ');
+	run(): TPromise<void> {
+
+		return this.viewletService.openViewlet(VIEWLET_ID, true)
+			.then(viewlet => viewlet as IExtensionsViewlet)
+			.then(viewlet => {
+				viewlet.search('@outdated', true);
+				viewlet.focus();
+			});
 	}
 
 	protected isEnabled(): boolean {
@@ -32,22 +257,53 @@ export class ListExtensionsAction extends Action {
 	}
 }
 
-export class InstallExtensionAction extends Action {
+export class ShowPopularExtensionsAction extends Action {
 
-	static ID = 'workbench.extensions.action.installExtension';
-	static LABEL = nls.localize('installExtension', "Install Extension");
+	static ID = 'workbench.extensions.action.showPopularExtensions';
+	static LABEL = localize('showPopularExtensions', "Show Popular Extensions");
 
 	constructor(
 		id: string,
 		label: string,
-		@IExtensionsService private extensionsService: IExtensionsService,
-		@IQuickOpenService private quickOpenService: IQuickOpenService
+		@IViewletService private viewletService: IViewletService
 	) {
-		super(id, label, null, true);
+		super(id, label, 'show-popular-extensions octicon octicon-flame', true);
 	}
 
-	public run(): Promise {
-		return this.quickOpenService.show('ext install ');
+	run(): TPromise<void> {
+		return this.viewletService.openViewlet(VIEWLET_ID, true)
+			.then(viewlet => viewlet as IExtensionsViewlet)
+			.then(viewlet => {
+				viewlet.search('@popular', true);
+				viewlet.focus();
+			});
+	}
+
+	protected isEnabled(): boolean {
+		return true;
+	}
+}
+
+export class ShowExtensionRecommendationsAction extends Action {
+
+	static ID = 'workbench.extensions.action.showExtensionRecommendations';
+	static LABEL = localize('showExtensionRecommendations', "Show Extension Recommendations");
+
+	constructor(
+		id: string,
+		label: string,
+		@IViewletService private viewletService: IViewletService
+	) {
+		super(id, label, 'show-extension-recommendations octicon octicon-gift', true);
+	}
+
+	run(): TPromise<void> {
+		return this.viewletService.openViewlet(VIEWLET_ID, true)
+			.then(viewlet => viewlet as IExtensionsViewlet)
+			.then(viewlet => {
+				viewlet.search('@recommended', true);
+				viewlet.focus();
+			});
 	}
 
 	protected isEnabled(): boolean {

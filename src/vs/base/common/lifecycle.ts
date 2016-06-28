@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
+import { isArray } from './types';
+
 export const empty: IDisposable = Object.freeze({
 	dispose() { }
 });
@@ -12,60 +14,58 @@ export interface IDisposable {
 	dispose(): void;
 }
 
-export function disposeAll<T extends IDisposable>(arr: T[]): T[] {
-	for (var i = 0, len = arr.length; i < len; i++) {
-		if(arr[i]) {
-			arr[i].dispose();
-		}
+export function dispose<T extends IDisposable>(...disposables: T[]): T;
+export function dispose<T extends IDisposable>(disposables: T[]): T[];
+export function dispose<T extends IDisposable>(...disposables: T[]): T[] {
+	const first = disposables[0];
+
+	if (isArray(first)) {
+		disposables = first as any as T[];
 	}
 
+	disposables.forEach(d => d && d.dispose());
 	return [];
 }
 
-export function combinedDispose(...disposables: IDisposable[]): IDisposable {
-	return {
-		dispose: () => disposeAll(disposables)
-	};
+export function combinedDisposable(disposables: IDisposable[]): IDisposable;
+export function combinedDisposable(...disposables: IDisposable[]): IDisposable;
+export function combinedDisposable(disposables: any): IDisposable {
+	return { dispose: () => dispose(disposables) };
 }
 
-export function combinedDispose2(disposables: IDisposable[]): IDisposable {
-	return {
-		dispose: () => disposeAll(disposables)
-	};
+export function toDisposable(...fns: (() => void)[]): IDisposable {
+	return combinedDisposable(fns.map(fn => ({ dispose: fn })));
 }
 
-export function fnToDisposable(fn: ()=>void): IDisposable {
-	return {
-		dispose: () => fn()
-	};
-}
+export abstract class Disposable implements IDisposable {
 
-export function toDisposable(...fns: (()=>void)[]): IDisposable {
-	return combinedDispose2(fns.map(fnToDisposable));
-}
+	private _toDispose: IDisposable[];
 
-function callAll(arg:any):any {
-	if (!arg) {
-		return null;
-	} else if(typeof arg === 'function') {
-		arg();
-		return null;
-	} else if(Array.isArray(arg)) {
-		while(arg.length > 0) {
-			arg.pop()();
-		}
-		return arg;
-	} else {
-		return null;
+	constructor() {
+		this._toDispose = [];
+	}
+
+	public dispose(): void {
+		this._toDispose = dispose(this._toDispose);
+	}
+
+	protected _register<T extends IDisposable>(t:T): T {
+		this._toDispose.push(t);
+		return t;
 	}
 }
 
-export interface CallAll {
-	(fn: Function): Function;
-	(fn: Function[]): Function[];
-}
+export class Disposables extends Disposable {
 
-/**
- * Calls all functions that are being passed to it.
- */
-export var cAll: CallAll = callAll;
+	public add<T extends IDisposable>(e: T): T;
+	public add(...elements: IDisposable[]): void;
+	public add<T extends IDisposable>(arg: T | T[]): T {
+		if (!Array.isArray(arg)) {
+			return this._register(arg);
+		} else {
+			for (let element of arg) {
+				return this._register(element);
+			}
+		}
+	}
+}

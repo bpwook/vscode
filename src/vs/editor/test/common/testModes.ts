@@ -4,13 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import modes = require('vs/editor/common/modes');
-import supports = require('vs/editor/common/modes/supports');
-import stream = require('vs/editor/common/modes/lineStream');
-import servicesUtil = require('vs/editor/test/common/servicesTestUtils');
-import {AbstractMode} from 'vs/editor/common/modes/abstractMode';
+import * as modes from 'vs/editor/common/modes';
 import {AbstractState} from 'vs/editor/common/modes/abstractState';
-import {AbstractModeWorker} from 'vs/editor/common/modes/abstractModeWorker';
+import {LanguageConfigurationRegistry, CommentRule} from 'vs/editor/common/modes/languageConfigurationRegistry';
+import {TokenizationSupport} from 'vs/editor/common/modes/supports/tokenizationSupport';
+import {MockMode} from 'vs/editor/test/common/mocks/mockMode';
 
 export class CommentState extends AbstractState {
 
@@ -32,53 +30,23 @@ export class CommentState extends AbstractState {
 	}
 }
 
-export class CommentMode extends AbstractMode<AbstractModeWorker> {
-
-	private commentsConfig:modes.ICommentsConfiguration;
+export class CommentMode extends MockMode {
 
 	public tokenizationSupport: modes.ITokenizationSupport;
 
-	constructor(commentsConfig:modes.ICommentsConfiguration) {
-		super({ id: 'tests.commentMode', workerParticipants: [] }, null, null);
-		this.commentsConfig = commentsConfig;
-
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
+	constructor(commentsConfig:CommentRule) {
+		super();
+		this.tokenizationSupport = new TokenizationSupport(this, {
 			getInitialState: () => new CommentState(this, 0)
-		}, false, false);
-	}
+		}, false);
 
-	public getCommentsConfiguration():modes.ICommentsConfiguration {
-		return this.commentsConfig;
-	}
-}
-
-export class CursorState extends AbstractState {
-
-	constructor(mode:CursorMode) {
-		super(mode);
-	}
-
-	public makeClone():CursorState {
-		return this;
-	}
-
-	public equals(other: modes.IState):boolean {
-		return this === other;
-	}
-
-	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
-		stream.advanceToEOS();
-		return { type: 'foooooo' };
+		LanguageConfigurationRegistry.register(this.getId(), {
+			comments: commentsConfig
+		});
 	}
 }
 
-export class TestingMode implements modes.IMode {
-	public getId():string {
-		return 'testing';
-	}
-}
-
-export class AbstractIndentingMode extends TestingMode {
+export abstract class AbstractIndentingMode extends MockMode {
 
 	public getElectricCharacters():string[] {
 		return null;
@@ -88,130 +56,10 @@ export class AbstractIndentingMode extends TestingMode {
 		return null;
 	}
 
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
+	public onEnter(context:modes.ILineContext, offset:number):modes.EnterAction {
 		return null;
 	}
 
-}
-
-export class IndentingMode extends AbstractIndentingMode {
-
-	public electricCharacterSupport: modes.IElectricCharacterSupport;
-
-	constructor() {
-		super();
-		this.electricCharacterSupport = this;
-	}
-
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
-		return {
-			indentAction:modes.IndentAction.Indent
-		};
-	}
-}
-
-export class NonIndentingMode extends AbstractIndentingMode {
-
-	public electricCharacterSupport: modes.IElectricCharacterSupport;
-
-	constructor() {
-		super();
-		this.electricCharacterSupport = this;
-	}
-
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
-		return {
-			indentAction:modes.IndentAction.None
-		};
-	}
-}
-
-export class IndentOutdentMode extends AbstractIndentingMode {
-
-	public electricCharacterSupport: modes.IElectricCharacterSupport;
-
-	constructor() {
-		super();
-		this.electricCharacterSupport = this;
-	}
-
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
-		return {
-			indentAction:modes.IndentAction.IndentOutdent
-		};
-	}
-}
-
-export class CursorMode extends AbstractIndentingMode {
-
-	public tokenizationSupport: modes.ITokenizationSupport;
-	public electricCharacterSupport: modes.IElectricCharacterSupport;
-
-	constructor() {
-		super();
-		this.tokenizationSupport = new supports.TokenizationSupport(this, this, false, false);
-		this.electricCharacterSupport = this;
-	}
-
-	public getInitialState():modes.IState {
-		return new CursorState(this);
-	}
-
-	public getElectricCharacters():string[] {
-		return null;
-	}
-
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
-		return null;
-	}
-}
-
-export class SurroundingState extends AbstractState {
-
-	constructor(mode:SurroundingMode) {
-		super(mode);
-	}
-
-	public makeClone():SurroundingState {
-		return this;
-	}
-
-	public equals(other: modes.IState):boolean {
-		return this === other;
-	}
-
-	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
-		stream.advanceToEOS();
-		return { type: '' };
-	}
-}
-
-export class SurroundingMode extends AbstractIndentingMode {
-
-	public tokenizationSupport: modes.ITokenizationSupport;
-	public electricCharacterSupport: modes.IElectricCharacterSupport;
-	public characterPairSupport: modes.ICharacterPairSupport;
-
-	constructor() {
-		super();
-		this.tokenizationSupport = new supports.TokenizationSupport(this, this, false, false);
-		this.electricCharacterSupport = this;
-
-		this.characterPairSupport = new supports.CharacterPairSupport(this, {
-			autoClosingPairs: [{ open: '(', close: ')' }]});
-	}
-
-	public getInitialState():modes.IState {
-		return new SurroundingState(this);
-	}
-
-	public getElectricCharacters():string[] {
-		return null;
-	}
-
-	public onEnter(context:modes.ILineContext, offset:number):modes.IEnterAction {
-		return null;
-	}
 }
 
 export class ModelState1 extends AbstractState {
@@ -235,7 +83,7 @@ export class ModelState1 extends AbstractState {
 	}
 }
 
-export class ModelMode1 extends TestingMode {
+export class ModelMode1 extends MockMode {
 	public calledFor:string[];
 
 	public tokenizationSupport: modes.ITokenizationSupport;
@@ -243,9 +91,9 @@ export class ModelMode1 extends TestingMode {
 	constructor() {
 		super();
 		this.calledFor = [];
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
+		this.tokenizationSupport = new TokenizationSupport(this, {
 			getInitialState: () => new ModelState1(this)
-		}, false, false);
+		}, false);
 	}
 }
 
@@ -276,7 +124,7 @@ export class ModelState2 extends AbstractState {
 	}
 }
 
-export class ModelMode2 extends TestingMode {
+export class ModelMode2 extends MockMode {
 	public calledFor:any[];
 
 	public tokenizationSupport: modes.ITokenizationSupport;
@@ -284,85 +132,23 @@ export class ModelMode2 extends TestingMode {
 	constructor() {
 		super();
 		this.calledFor = null;
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
+		this.tokenizationSupport = new TokenizationSupport(this, {
 			getInitialState: () => new ModelState2(this, '')
-		}, false, false);
+		}, false);
 	}
 }
 
-export class BracketState extends AbstractState {
-
-	private allResults:{
-		[key:string]:modes.ITokenizationResult;
-	};
-
-	constructor(mode:modes.IMode) {
-		super(mode);
-		this.allResults = null;
-	}
-
-	public makeClone():BracketState {
-		return this;
-	}
-
-	public equals(other: modes.IState):boolean {
-		return true;
-	}
-
-	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
-		this.initializeAllResults();
-		stream.setTokenRules('{}[]()', '');
-		var token= stream.nextToken();
-		// Strade compiler bug: can't reference self in Object return creation.
-		var state:modes.IState = this;
-		if (this.allResults.hasOwnProperty(token)) {
-			return this.allResults[token];
-		} else {
-			return {
-				type: '',
-				bracket: modes.Bracket.None,
-				nextState: state
-			};
-		}
-	}
-
-	public initializeAllResults(): void {
-		if (this.allResults !== null)
-			return;
-		this.allResults = {};
-		var brackets:any= {
-			'{': '}',
-			'[': ']',
-			'(': ')'
-		};
-
-		var type= 1;
-		var state:modes.IState = this;
-		for (var x in brackets) {
-			this.allResults[x]= {
-				type: 'bracket' + type,
-				bracket: modes.Bracket.Open,
-				nextState: state
-			};
-			this.allResults[brackets[x]] = {
-				type: 'bracket' + type,
-				bracket: modes.Bracket.Close,
-				nextState: state
-			};
-			type++;
-		}
-	}
-}
-
-export class BracketMode extends TestingMode {
-
-	public tokenizationSupport: modes.ITokenizationSupport;
+export class BracketMode extends MockMode {
 
 	constructor() {
 		super();
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
-			getInitialState: () => new BracketState(this)
-		}, false, false);
+		LanguageConfigurationRegistry.register(this.getId(), {
+			brackets: [
+				['{', '}'],
+				['[', ']'],
+				['(', ')'],
+			]
+		});
 	}
 }
 
@@ -396,17 +182,17 @@ export class NState extends AbstractState {
 	}
 }
 
-export class NMode extends TestingMode {
+export class NMode extends MockMode {
 
 	private n:number;
 
 	public tokenizationSupport: modes.ITokenizationSupport;
 
 	constructor(n:number) {
-		this.n = n;
 		super();
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
+		this.n = n;
+		this.tokenizationSupport = new TokenizationSupport(this, {
 			getInitialState: () => new NState(this, this.n)
-		}, false, false);
+		}, false);
 	}
 }

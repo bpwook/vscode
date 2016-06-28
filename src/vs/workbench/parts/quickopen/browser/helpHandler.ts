@@ -9,13 +9,13 @@ import nls = require('vs/nls');
 import {Builder, $} from 'vs/base/browser/builder';
 import types = require('vs/base/common/types');
 import {Registry} from 'vs/platform/platform';
-import {Mode, IContext, IAutoFocus} from 'vs/base/parts/quickopen/browser/quickOpen';
-import {QuickOpenEntry, QuickOpenEntryItem, QuickOpenModel} from 'vs/base/parts/quickopen/browser/quickOpenModel';
-import {ITree, IElementCallback} from 'vs/base/parts/tree/common/tree';
-import {QuickOpenHandlerDescriptor, IQuickOpenRegistry, Extensions, QuickOpenHandler} from 'vs/workbench/browser/quickopen';
-import {IQuickOpenService} from 'vs/workbench/services/quickopen/browser/quickOpenService';
+import {Mode, IEntryRunContext, IAutoFocus} from 'vs/base/parts/quickopen/common/quickOpen';
+import {QuickOpenEntryItem, QuickOpenModel} from 'vs/base/parts/quickopen/browser/quickOpenModel';
+import {ITree, IElementCallback} from 'vs/base/parts/tree/browser/tree';
+import {IQuickOpenRegistry, Extensions, QuickOpenHandler} from 'vs/workbench/browser/quickopen';
+import {IQuickOpenService} from 'vs/workbench/services/quickopen/common/quickOpenService';
 
-const HELP_PREFIX = '?';
+export const HELP_PREFIX = '?';
 
 class HelpEntry extends QuickOpenEntryItem {
 	private prefix: string;
@@ -38,12 +38,16 @@ class HelpEntry extends QuickOpenEntryItem {
 		return this.prefix;
 	}
 
+	public getAriaLabel(): string {
+		return nls.localize('entryAriaLabel', "{0}, picker help", this.getLabel());
+	}
+
 	public getDescription(): string {
 		return this.description;
 	}
 
 	public getHeight(): number {
-		return 24;
+		return 22;
 	}
 
 	public getGroupLabel(): string {
@@ -102,7 +106,7 @@ class HelpEntry extends QuickOpenEntryItem {
 		return null;
 	}
 
-	public run(mode: Mode, context: IContext): boolean {
+	public run(mode: Mode, context: IEntryRunContext): boolean {
 		if (mode === Mode.OPEN || this.openOnPreview) {
 			this.quickOpenService.show(this.prefix);
 		}
@@ -131,8 +135,8 @@ export class HelpHandler extends QuickOpenHandler {
 		let workbenchScoped: HelpEntry[] = [];
 		let editorScoped: HelpEntry[] = [];
 		let entry: HelpEntry;
-		for (let i = 0; i < handlerDescriptors.length; i++) {
-			let handlerDescriptor = handlerDescriptors[i];
+
+		handlerDescriptors.sort((h1, h2) => h1.prefix.localeCompare(h2.prefix)).forEach((handlerDescriptor) => {
 			if (handlerDescriptor.prefix !== HELP_PREFIX) {
 
 				// Descriptor has multiple help entries
@@ -157,7 +161,7 @@ export class HelpHandler extends QuickOpenHandler {
 					workbenchScoped.push(entry);
 				}
 			}
-		}
+		});
 
 		// Add separator for workbench scoped handlers
 		if (workbenchScoped.length > 0) {
@@ -183,13 +187,3 @@ export class HelpHandler extends QuickOpenHandler {
 		};
 	}
 }
-
-// Register Quick Open Handler
-(<IQuickOpenRegistry>Registry.as(Extensions.Quickopen)).registerQuickOpenHandler(
-	new QuickOpenHandlerDescriptor(
-		'vs/workbench/parts/quickopen/browser/helpHandler',
-		'HelpHandler',
-		HELP_PREFIX,
-		nls.localize('helpDescription', "Show Help")
-	)
-);

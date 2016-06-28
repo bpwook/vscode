@@ -12,14 +12,14 @@ import Lifecycle = require('vs/base/common/lifecycle');
 import EventEmitter = require('vs/base/common/eventEmitter');
 import Strings = require('vs/base/common/strings');
 import Errors = require('vs/base/common/errors');
+import * as paths from 'vs/base/common/paths';
 import WinJS = require('vs/base/common/winjs.base');
 import Builder = require('vs/base/browser/builder');
-import Keyboard = require('vs/base/browser/keyboardEvent');
+import {StandardKeyboardEvent, IKeyboardEvent} from 'vs/base/browser/keyboardEvent';
 import Actions = require('vs/base/common/actions');
 import ActionBar = require('vs/base/browser/ui/actionbar/actionbar');
-import Tree = require('vs/base/parts/tree/common/tree');
+import Tree = require('vs/base/parts/tree/browser/tree');
 import TreeImpl = require('vs/base/parts/tree/browser/treeImpl');
-import WorkbenchEvents = require('vs/workbench/browser/events');
 import git = require('vs/workbench/parts/git/common/git');
 import GitView = require('vs/workbench/parts/git/browser/views/view');
 import GitActions = require('vs/workbench/parts/git/browser/gitActions');
@@ -37,10 +37,10 @@ import {IEditorInput} from 'vs/platform/editor/common/editor';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IMessageService} from 'vs/platform/message/common/message';
 import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
-import {ISelection, StructuredSelection} from 'vs/platform/selection/common/selection';
 import {IEventService} from 'vs/platform/event/common/event';
 import {CommonKeybindings} from 'vs/base/common/keyCodes';
-import {IKeyboardEvent} from 'vs/base/browser/dom';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
 
 import IGitService = git.IGitService;
 
@@ -53,6 +53,7 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 	private static COMMIT_KEYBINDING = Platform.isMacintosh ? 'Cmd+Enter' : 'Ctrl+Enter';
 	private static NEED_MESSAGE = nls.localize('needMessage', "Please provide a commit message. You can always press **{0}** to commit changes. If there are any staged changes, only those will be committed; otherwise, all changes will.", ChangesView.COMMIT_KEYBINDING);
 	private static NOTHING_TO_COMMIT = nls.localize('nothingToCommit', "Once there are some changes to commit, type in the commit message and either press **{0}** to commit changes. If there are any staged changes, only those will be committed; otherwise, all changes will.", ChangesView.COMMIT_KEYBINDING);
+	private static LONG_COMMIT = nls.localize('longCommit', "It is recommended to keep the commit's first line under 50 characters. Feel free to use more lines for extra information.");
 
 	private instantiationService: IInstantiationService;
 	private editorService: IWorkbenchEditorService;
@@ -81,12 +82,14 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 	constructor(actionRunner: Actions.IActionRunner,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IWorkbenchEditorService editorService: IWorkbenchEditorService,
+		@IEditorGroupService editorGroupService: IEditorGroupService,
 		@IMessageService messageService: IMessageService,
 		@IContextViewService contextViewService: IContextViewService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
 		@IGitService gitService: IGitService,
 		@IOutputService outputService: IOutputService,
-		@IEventService eventService: IEventService
+		@IEventService eventService: IEventService,
+		@IConfigurationService private configurationService: IConfigurationService
 	) {
 		super();
 
@@ -104,7 +107,7 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 
 		this.toDispose = [
 			this.smartCommitAction = this.instantiationService.createInstance(GitActions.SmartCommitAction, this),
-			eventService.addListener2(WorkbenchEvents.EventType.EDITOR_INPUT_CHANGED, (e:WorkbenchEvents.EditorEvent) => this.onEditorInputChanged(e.editorInput).done(null, Errors.onUnexpectedError)),
+			editorGroupService.onEditorsChanged(() => this.onEditorsChanged(this.editorService.getActiveEditorInput()).done(null, Errors.onUnexpectedError)),
 			this.gitService.addListener2(git.ServiceEvents.OPERATION_START, (e) => this.onGitOperationStart(e)),
 			this.gitService.addListener2(git.ServiceEvents.OPERATION_END, (e) => this.onGitOperationEnd(e)),
 			this.gitService.getModel().addListener2(git.ModelEvents.MODEL_UPDATED, this.onGitModelUpdate.bind(this))
@@ -132,15 +135,32 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			placeholder: nls.localize('commitMessage', "Message (press {0} to commit)", ChangesView.COMMIT_KEYBINDING),
 			validationOptions: {
 				showMessage: true,
-				validation: (): InputBox.IMessage => null
+				validation: (value): InputBox.IMessage => {
+					const config = this.configurationService.getConfiguration<git.IGitConfiguration>('git');
+
+					if (!config.enableLongCommitWarning) {
+						return null;
+					}
+
+					if (/^[^\n]{51}/.test(value)) {
+						return {
+							content: ChangesView.LONG_COMMIT,
+							type: InputBox.MessageType.WARNING
+						};
+					}
+
+					return null;
+				}
 			},
+			ariaLabel: nls.localize('commitMessageAriaLabel', "Git: Type commit message and press {0} to commit", ChangesView.COMMIT_KEYBINDING),
 			flexibleHeight: true
 		});
 
-		this.addEmitter2(this.commitInputBox, 'commitInputBox');
+		this.commitInputBox.onDidChange((value) => this.emit('change', value));
+		this.commitInputBox.onDidHeightChange((value) => this.emit('heightchange', value));
 
 		$(this.commitInputBox.inputElement).on('keydown', (e:KeyboardEvent) => {
-			var keyboardEvent = new Keyboard.StandardKeyboardEvent(e);
+			var keyboardEvent = new StandardKeyboardEvent(e);
 
 			if (keyboardEvent.equals(CommonKeybindings.CTRLCMD_ENTER) || keyboardEvent.equals(CommonKeybindings.CTRLCMD_S)) {
 				if (this.smartCommitAction.enabled) {
@@ -167,24 +187,26 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			renderer: renderer,
 			filter: new Viewer.Filter(),
 			sorter: new Viewer.Sorter(),
+			accessibilityProvider: new Viewer.AccessibilityProvider(),
 			dnd: dnd,
 			controller: controller
 		}, {
 			indentPixels: 0,
-			twistiePixels: 20
+			twistiePixels: 20,
+			ariaLabel: nls.localize('treeAriaLabel', "Git Changes View")
 		});
 
 		this.tree.setInput(this.gitService.getModel().getStatus());
 		this.tree.expandAll(this.gitService.getModel().getStatus().getGroups());
 
 		this.toDispose.push(this.tree.addListener2('selection', (e) => this.onSelection(e)));
-		this.toDispose.push(this.commitInputBox.addListener2('heightchange', () => this.layout()));
+		this.toDispose.push(this.commitInputBox.onDidHeightChange(() => this.layout()));
 	}
 
 	public focus():void {
 		var selection = this.tree.getSelection();
 		if (selection.length > 0) {
-			this.tree.reveal(selection[0], 0.5);
+			this.tree.reveal(selection[0], 0.5).done(null, Errors.onUnexpectedError);
 		}
 
 		this.commitInputBox.focus();
@@ -197,7 +219,8 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 
 		this.currentDimension = dimension;
 
-		var statusViewHeight = dimension.height - (this.commitInputBox.height + 10 /* margin */);
+		this.commitInputBox.layout();
+		var statusViewHeight = dimension.height - (this.commitInputBox.height + 12 /* margin */);
 		this.$statusView.size(dimension.width, statusViewHeight);
 		this.tree.layout(statusViewHeight);
 
@@ -213,16 +236,12 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 
 		if (visible) {
 			this.tree.onVisible();
-			return this.onEditorInputChanged(this.editorService.getActiveEditorInput());
+			return this.onEditorsChanged(this.editorService.getActiveEditorInput());
 
 		} else {
 			this.tree.onHidden();
-			return WinJS.Promise.as(null);
+			return WinJS.TPromise.as(null);
 		}
-	}
-
-	public getSelection():ISelection {
-		return new StructuredSelection(this.tree.getSelection());
 	}
 
 	public getControl(): Tree.ITree {
@@ -245,18 +264,21 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 	public getSecondaryActions(): Actions.IAction[] {
 		if (!this.secondaryActions) {
 			this.secondaryActions = [
-				this.instantiationService.createInstance(GitActions.SyncAction),
-				this.instantiationService.createInstance(GitActions.PullAction),
-				this.instantiationService.createInstance(GitActions.PushAction),
+				this.instantiationService.createInstance(GitActions.SyncAction, GitActions.SyncAction.ID, GitActions.SyncAction.LABEL),
+				this.instantiationService.createInstance(GitActions.PullAction, GitActions.PullAction.ID, GitActions.PullAction.LABEL),
+				this.instantiationService.createInstance(GitActions.PullWithRebaseAction),
+				this.instantiationService.createInstance(GitActions.PushAction, GitActions.PushAction.ID, GitActions.PushAction.LABEL),
+				new ActionBar.Separator(),
+				this.instantiationService.createInstance(GitActions.PublishAction, GitActions.PublishAction.ID, GitActions.PublishAction.LABEL),
 				new ActionBar.Separator(),
 				this.instantiationService.createInstance(GitActions.CommitAction, this),
 				this.instantiationService.createInstance(GitActions.StageAndCommitAction, this),
-				this.instantiationService.createInstance(GitActions.UndoLastCommitAction),
+				this.instantiationService.createInstance(GitActions.UndoLastCommitAction, GitActions.UndoLastCommitAction.ID, GitActions.UndoLastCommitAction.LABEL),
 				new ActionBar.Separator(),
 				this.instantiationService.createInstance(GitActions.GlobalUnstageAction),
 				this.instantiationService.createInstance(GitActions.GlobalUndoAction),
 				new ActionBar.Separator(),
-				new Actions.Action('show.gitOutput', nls.localize('showOutput', "Show Git Output"), null, true, () => this.outputService.showOutput('Git'))
+				new Actions.Action('show.gitOutput', nls.localize('showOutput', "Show Git Output"), null, true, () => this.outputService.getChannel('Git').show())
 			];
 
 			this.secondaryActions.forEach(a => this.toDispose.push(a));
@@ -286,26 +308,24 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 		}
 	}
 
-	private onEditorInputChanged(input: IEditorInput): WinJS.Promise {
+	private onEditorsChanged(input: IEditorInput): WinJS.TPromise<void> {
 		if (!this.tree) {
-			return WinJS.Promise.as(null);
+			return WinJS.TPromise.as(null);
 		}
 
 		var status = this.getStatusFromInput(input);
 
 		if (!status) {
 			this.tree.clearSelection();
-			this.tree.clearFocus();
 		}
 
 		if (this.visible && this.tree.getSelection().indexOf(status) === -1) {
 			return this.tree.reveal(status, 0.5).then(() => {
 				this.tree.setSelection([status], { origin: 'implicit' });
-				this.tree.setFocus(status);
 			});
 		}
 
-		return WinJS.Promise.as(null);
+		return WinJS.TPromise.as(null);
 	}
 
 	private onSelection(e: Tree.ISelectionEvent): void {
@@ -323,7 +343,7 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			return;
 		}
 
-		if (e.payload && e.payload.origin === 'keyboard' && (<IKeyboardEvent>e.payload.originalEvent).equals(CommonKeybindings.ENTER)) {
+		if (e.payload && e.payload.origin === 'keyboard' && !(<IKeyboardEvent>e.payload.originalEvent).equals(CommonKeybindings.ENTER)) {
 			return;
 		}
 
@@ -332,6 +352,8 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 		if (isMouseOrigin && (e.payload.originalEvent.metaKey || e.payload.originalEvent.shiftKey)) {
 			return;
 		}
+
+		var isDoubleClick = isMouseOrigin && e.payload.originalEvent && e.payload.originalEvent.detail === 2;
 
 		var status = <git.IFileStatus> element;
 
@@ -349,6 +371,7 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			}
 
 			options.forceOpen = true;
+			options.pinned = isDoubleClick;
 
 			var sideBySide = (e && e.payload && e.payload.originalEvent && e.payload.originalEvent.altKey);
 
@@ -394,28 +417,32 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			return (<GitEditorInputs.GitDiffEditorInput> input).getFileStatus();
 		}
 
-		if (input instanceof GitEditorInputs.GitIndexEditorInput) {
-			return (<GitEditorInputs.GitIndexEditorInput> input).getFileStatus() || null;
-		}
-
 		if (input instanceof GitEditorInputs.NativeGitIndexStringEditorInput) {
 			return (<GitEditorInputs.NativeGitIndexStringEditorInput> input).getFileStatus() || null;
 		}
 
 		if (input instanceof Files.FileEditorInput) {
-			var fileInput = <Files.FileEditorInput> input;
+			const fileInput = <Files.FileEditorInput> input;
+			const resource = fileInput.getResource();
 
-			var workspaceRelativePath = this.contextService.toWorkspaceRelativePath(fileInput.getResource());
-			if (!workspaceRelativePath) {
+			const workspaceRoot = this.contextService.getWorkspace().resource.fsPath;
+			if (!workspaceRoot || !paths.isEqualOrParent(resource.fsPath, workspaceRoot)) {
 				return null; // out of workspace not yet supported
 			}
 
-			var status = this.gitService.getModel().getStatus().getWorkingTreeStatus().find(workspaceRelativePath);
+			const repositoryRoot = this.gitService.getModel().getRepositoryRoot();
+			if (!repositoryRoot || !paths.isEqualOrParent(resource.fsPath, repositoryRoot)) {
+				return null; // out of repository not supported
+			}
+
+			const repositoryRelativePath = paths.normalize(paths.relative(repositoryRoot, resource.fsPath));
+
+			var status = this.gitService.getModel().getStatus().getWorkingTreeStatus().find(repositoryRelativePath);
 			if (status && (status.getStatus() === git.Status.UNTRACKED || status.getStatus() === git.Status.IGNORED)) {
 				return status;
 			}
 
-			status = this.gitService.getModel().getStatus().getMergeStatus().find(workspaceRelativePath);
+			status = this.gitService.getModel().getStatus().getMergeStatus().find(repositoryRelativePath);
 			if (status) {
 				return status;
 			}
@@ -430,7 +457,7 @@ export class ChangesView extends EventEmitter.EventEmitter implements GitView.IV
 			this.$el = null;
 		}
 
-		this.toDispose = Lifecycle.disposeAll(this.toDispose);
+		this.toDispose = Lifecycle.dispose(this.toDispose);
 
 		super.dispose();
 	}

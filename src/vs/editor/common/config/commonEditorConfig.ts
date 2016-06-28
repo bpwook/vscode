@@ -4,36 +4,87 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import nls = require('vs/nls');
-import Objects = require('vs/base/common/objects');
-import {EventEmitter} from 'vs/base/common/eventEmitter';
-import Strings = require('vs/base/common/strings');
+import * as nls from 'vs/nls';
+import Event, {Emitter} from 'vs/base/common/event';
+import {Disposable} from 'vs/base/common/lifecycle';
+import * as objects from 'vs/base/common/objects';
+import * as platform from 'vs/base/common/platform';
+import {Extensions, IConfigurationRegistry, IConfigurationNode} from 'vs/platform/configuration/common/configurationRegistry';
 import {Registry} from 'vs/platform/platform';
-import ConfigurationRegistry = require('vs/platform/configuration/common/configurationRegistry');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import {DefaultConfig} from 'vs/editor/common/config/defaultConfig';
-import {HandlerDispatcher} from 'vs/editor/common/controller/handlerDispatcher';
+import {DefaultConfig, DEFAULT_INDENTATION, DEFAULT_TRIM_AUTO_WHITESPACE, GOLDEN_LINE_HEIGHT_RATIO} from 'vs/editor/common/config/defaultConfig';
+import * as editorCommon from 'vs/editor/common/editorCommon';
 import {EditorLayoutProvider} from 'vs/editor/common/viewLayout/editorLayoutProvider';
+import {ScrollbarVisibility} from 'vs/base/browser/ui/scrollbar/scrollableElementOptions';
+
+export interface IEditorZoom {
+	onDidChangeZoomLevel:Event<number>;
+	getZoomLevel(): number;
+	setZoomLevel(zoomLevel:number): void;
+}
+
+export const EditorZoom: IEditorZoom = new class {
+
+	private _zoomLevel: number = 0;
+
+	private _onDidChangeZoomLevel: Emitter<number> = new Emitter<number>();
+	public onDidChangeZoomLevel:Event<number> = this._onDidChangeZoomLevel.event;
+
+	public getZoomLevel(): number {
+		return this._zoomLevel;
+	}
+
+	public setZoomLevel(zoomLevel:number): void {
+		zoomLevel = Math.min(Math.max(-9, zoomLevel), 9);
+		if (this._zoomLevel === zoomLevel) {
+			return;
+		}
+
+		this._zoomLevel = zoomLevel;
+		this._onDidChangeZoomLevel.fire(this._zoomLevel);
+	}
+};
+
+/**
+ * Experimental screen reader support toggle
+ */
+export class GlobalScreenReaderNVDA {
+
+	private static _value = false;
+	private static _onChange = new Emitter<boolean>();
+	public static onChange: Event<boolean> = GlobalScreenReaderNVDA._onChange.event;
+
+	public static getValue(): boolean {
+		return this._value;
+	}
+
+	public static setValue(value:boolean): void {
+		if (this._value === value) {
+			return;
+		}
+		this._value = value;
+		this._onChange.fire(this._value);
+	}
+}
 
 export class ConfigurationWithDefaults {
 
-	private _editor:EditorCommon.IEditorOptions;
+	private _editor:editorCommon.IEditorOptions;
 
-	constructor(options:EditorCommon.IEditorOptions) {
-		this._editor = <EditorCommon.IEditorOptions>Objects.clone(DefaultConfig.editor);
+	constructor(options:editorCommon.IEditorOptions) {
+		this._editor = <editorCommon.IEditorOptions>objects.clone(DefaultConfig.editor);
 
 		this._mergeOptionsIn(options);
 	}
 
-	public getEditorOptions(): EditorCommon.IEditorOptions {
+	public getEditorOptions(): editorCommon.IEditorOptions {
 		return this._editor;
 	}
 
-	private _mergeOptionsIn(newOptions:EditorCommon.IEditorOptions): void {
-		this._editor = Objects.mixin(this._editor, newOptions || {});
+	private _mergeOptionsIn(newOptions:editorCommon.IEditorOptions): void {
+		this._editor = objects.mixin(this._editor, newOptions || {});
 	}
 
-	public updateOptions(newOptions:EditorCommon.IEditorOptions): void {
+	public updateOptions(newOptions:editorCommon.IEditorOptions): void {
 		// Apply new options
 		this._mergeOptionsIn(newOptions);
 	}
@@ -45,30 +96,16 @@ class InternalEditorOptionsHelper {
 	}
 
 	public static createInternalEditorOptions(
-		outerWidth:number,
-		outerHeight:number,
-		opts:EditorCommon.IEditorOptions,
+		outerWidth:number, outerHeight:number,
+		opts:editorCommon.IEditorOptions,
+		fontInfo: editorCommon.FontInfo,
 		editorClassName:string,
-		requestedFontFamily:string,
-		requestedFontSize:number,
-		requestedLineHeight:number,
-		adjustedLineHeight:number,
-		themeOpts: ICSSConfig,
 		isDominatedByLongLines:boolean,
 		lineCount: number,
-		indentationOptions: EditorCommon.IInternalIndentationOptions
-	): EditorCommon.IInternalEditorOptions {
+		canUseTranslate3d: boolean
+	): editorCommon.InternalEditorOptions {
 
 		let wrappingColumn = toInteger(opts.wrappingColumn, -1);
-
-		let stopLineTokenizationAfter:number;
-		if (typeof opts.stopLineTokenizationAfter !== 'undefined') {
-			stopLineTokenizationAfter = toInteger(opts.stopLineTokenizationAfter, -1);
-		} else if (wrappingColumn >= 0) {
-			stopLineTokenizationAfter = -1;
-		} else {
-			stopLineTokenizationAfter = 10000;
-		}
 
 		let stopRenderingLineAfter:number;
 		if (typeof opts.stopRenderingLineAfter !== 'undefined') {
@@ -86,15 +123,18 @@ class InternalEditorOptionsHelper {
 		let lineNumbers = opts.lineNumbers;
 		let lineNumbersMinChars = toInteger(opts.lineNumbersMinChars, 1);
 		let lineDecorationsWidth = toInteger(opts.lineDecorationsWidth, 0);
+		if (opts.folding) {
+			lineDecorationsWidth += 16;
+		}
 		let layoutInfo = EditorLayoutProvider.compute({
 			outerWidth: outerWidth,
 			outerHeight: outerHeight,
 			showGlyphMargin: glyphMargin,
-			lineHeight: themeOpts.lineHeight,
+			lineHeight: fontInfo.lineHeight,
 			showLineNumbers: !!lineNumbers,
 			lineNumbersMinChars: lineNumbersMinChars,
 			lineDecorationsWidth: lineDecorationsWidth,
-			maxDigitWidth: themeOpts.maxDigitWidth,
+			maxDigitWidth: fontInfo.maxDigitWidth,
 			lineCount: lineCount,
 			verticalScrollbarWidth: scrollbar.verticalScrollbarSize,
 			horizontalScrollbarHeight: scrollbar.horizontalScrollbarSize,
@@ -102,100 +142,120 @@ class InternalEditorOptionsHelper {
 			verticalScrollbarHasArrows: scrollbar.verticalHasArrows
 		});
 
-		let pageSize = Math.floor(layoutInfo.height / themeOpts.lineHeight) - 2;
-
 		if (isDominatedByLongLines && wrappingColumn > 0) {
 			// Force viewport width wrapping if model is dominated by long lines
 			wrappingColumn = 0;
 		}
 
-		let wrappingInfo: EditorCommon.IEditorWrappingInfo;
-
+		let bareWrappingInfo: { isViewportWrapping: boolean; wrappingColumn: number; };
 		if (wrappingColumn === 0) {
 			// If viewport width wrapping is enabled
-			wrappingInfo = {
+			bareWrappingInfo = {
 				isViewportWrapping: true,
-				wrappingColumn: Math.max(1, Math.floor((layoutInfo.contentWidth - layoutInfo.verticalScrollbarWidth) / themeOpts.typicalHalfwidthCharacterWidth))
+				wrappingColumn: Math.max(1, Math.floor((layoutInfo.contentWidth - layoutInfo.verticalScrollbarWidth) / fontInfo.typicalHalfwidthCharacterWidth))
 			};
 		} else if (wrappingColumn > 0) {
 			// Wrapping is enabled
-			wrappingInfo = {
+			bareWrappingInfo = {
 				isViewportWrapping: false,
 				wrappingColumn: wrappingColumn
 			};
 		} else {
-			wrappingInfo = {
+			bareWrappingInfo = {
 				isViewportWrapping: false,
 				wrappingColumn: -1
 			};
 		}
+		let wrappingInfo = new editorCommon.EditorWrappingInfo({
+			isViewportWrapping: bareWrappingInfo.isViewportWrapping,
+			wrappingColumn: bareWrappingInfo.wrappingColumn,
+			wrappingIndent: wrappingIndentFromString(opts.wrappingIndent),
+			wordWrapBreakBeforeCharacters: String(opts.wordWrapBreakBeforeCharacters),
+			wordWrapBreakAfterCharacters: String(opts.wordWrapBreakAfterCharacters),
+			wordWrapBreakObtrusiveCharacters: String(opts.wordWrapBreakObtrusiveCharacters),
+		});
 
-		return {
-			// ---- Options that are transparent - get no massaging
+		let readOnly = toBoolean(opts.readOnly);
+
+		let tabFocusMode = toBoolean(opts.tabFocusMode);
+		if (readOnly) {
+			tabFocusMode = true;
+		}
+
+		let viewInfo = new editorCommon.InternalEditorViewOptions({
+			theme: opts.theme,
+			canUseTranslate3d: canUseTranslate3d,
+			experimentalScreenReader: toBoolean(opts.experimentalScreenReader),
+			rulers: toSortedIntegerArray(opts.rulers),
+			ariaLabel: String(opts.ariaLabel),
 			lineNumbers: lineNumbers,
 			selectOnLineNumbers: toBoolean(opts.selectOnLineNumbers),
 			glyphMargin: glyphMargin,
 			revealHorizontalRightPadding: toInteger(opts.revealHorizontalRightPadding, 0),
 			roundedSelection: toBoolean(opts.roundedSelection),
-			theme: opts.theme,
-			readOnly: toBoolean(opts.readOnly),
-			scrollbar: scrollbar,
 			overviewRulerLanes: toInteger(opts.overviewRulerLanes, 0, 3),
+			cursorBlinking: opts.cursorBlinking,
+			cursorStyle: cursorStyleFromString(opts.cursorStyle),
 			hideCursorInOverviewRuler: toBoolean(opts.hideCursorInOverviewRuler),
 			scrollBeyondLastLine: toBoolean(opts.scrollBeyondLastLine),
-			wrappingIndent: opts.wrappingIndent,
-			wordWrapBreakBeforeCharacters: opts.wordWrapBreakBeforeCharacters,
-			wordWrapBreakAfterCharacters: opts.wordWrapBreakAfterCharacters,
-			wordWrapBreakObtrusiveCharacters: opts.wordWrapBreakObtrusiveCharacters,
-			tabFocusMode: toBoolean(opts.tabFocusMode),
-			stopLineTokenizationAfter: stopLineTokenizationAfter,
+			editorClassName: editorClassName,
 			stopRenderingLineAfter: stopRenderingLineAfter,
-			longLineBoundary: toInteger(opts.longLineBoundary),
-			forcedTokenizationBoundary: toInteger(opts.forcedTokenizationBoundary),
+			renderWhitespace: toBoolean(opts.renderWhitespace),
+			renderControlCharacters: toBoolean(opts.renderControlCharacters),
+			indentGuides: toBoolean(opts.indentGuides),
+			scrollbar: scrollbar,
+		});
 
+		let contribInfo = new editorCommon.EditorContribOptions({
+			selectionClipboard: toBoolean(opts.selectionClipboard),
 			hover: toBoolean(opts.hover),
 			contextmenu: toBoolean(opts.contextmenu),
 			quickSuggestions: toBoolean(opts.quickSuggestions),
 			quickSuggestionsDelay: toInteger(opts.quickSuggestionsDelay),
+			parameterHints: toBoolean(opts.parameterHints),
 			iconsInSuggestions: toBoolean(opts.iconsInSuggestions),
-			autoClosingBrackets: toBoolean(opts.autoClosingBrackets),
 			formatOnType: toBoolean(opts.formatOnType),
 			suggestOnTriggerCharacters: toBoolean(opts.suggestOnTriggerCharacters),
+			acceptSuggestionOnEnter: toBoolean(opts.acceptSuggestionOnEnter),
 			selectionHighlight: toBoolean(opts.selectionHighlight),
 			outlineMarkers: toBoolean(opts.outlineMarkers),
 			referenceInfos: toBoolean(opts.referenceInfos),
-			renderWhitespace: toBoolean(opts.renderWhitespace),
+			folding: toBoolean(opts.folding),
+		});
 
+		return new editorCommon.InternalEditorOptions({
+			lineHeight: fontInfo.lineHeight, // todo -> duplicated in styling
+			readOnly: readOnly,
+			wordSeparators: String(opts.wordSeparators),
+			autoClosingBrackets: toBoolean(opts.autoClosingBrackets),
+			useTabStops: toBoolean(opts.useTabStops),
+			tabFocusMode: tabFocusMode,
 			layoutInfo: layoutInfo,
-			stylingInfo: {
-				editorClassName: editorClassName,
-				fontFamily: requestedFontFamily,
-				fontSize: requestedFontSize,
-				lineHeight: adjustedLineHeight
-			},
+			fontInfo: fontInfo,
+			viewInfo: viewInfo,
 			wrappingInfo: wrappingInfo,
-			indentInfo: indentationOptions,
-
-			observedOuterWidth: outerWidth,
-			observedOuterHeight: outerHeight,
-
-			lineHeight: themeOpts.lineHeight,
-
-			pageSize: pageSize,
-
-			typicalHalfwidthCharacterWidth: themeOpts.typicalHalfwidthCharacterWidth,
-			typicalFullwidthCharacterWidth: themeOpts.typicalFullwidthCharacterWidth,
-
-			fontSize: themeOpts.fontSize,
-		};
+			contribInfo: contribInfo,
+		});
 	}
 
-	private static _sanitizeScrollbarOpts(raw:EditorCommon.IEditorScrollbarOptions, mouseWheelScrollSensitivity:number): EditorCommon.IInternalEditorScrollbarOptions {
-		var horizontalScrollbarSize = toIntegerWithDefault(raw.horizontalScrollbarSize, 10);
-		var verticalScrollbarSize = toIntegerWithDefault(raw.verticalScrollbarSize, 14);
-		return {
-			vertical: toStringSet(raw.vertical, ['auto', 'visible', 'hidden'], 'auto'),
-			horizontal: toStringSet(raw.horizontal, ['auto', 'visible', 'hidden'], 'auto'),
+	private static _sanitizeScrollbarOpts(raw:editorCommon.IEditorScrollbarOptions, mouseWheelScrollSensitivity:number): editorCommon.InternalEditorScrollbarOptions {
+
+		var visibilityFromString = (visibility: string) => {
+			switch (visibility) {
+				case 'hidden':
+					return ScrollbarVisibility.Hidden;
+				case 'visible':
+					return ScrollbarVisibility.Visible;
+				default:
+					return ScrollbarVisibility.Auto;
+			}
+		};
+
+		let horizontalScrollbarSize = toIntegerWithDefault(raw.horizontalScrollbarSize, 10);
+		let verticalScrollbarSize = toIntegerWithDefault(raw.verticalScrollbarSize, 14);
+		return new editorCommon.InternalEditorScrollbarOptions({
+			vertical: visibilityFromString(raw.vertical),
+			horizontal: visibilityFromString(raw.horizontal),
 
 			arrowSize: toIntegerWithDefault(raw.arrowSize, 11),
 			useShadows: toBooleanWithDefault(raw.useShadows, true),
@@ -211,104 +271,8 @@ class InternalEditorOptionsHelper {
 
 			handleMouseWheel: toBooleanWithDefault(raw.handleMouseWheel, true),
 			mouseWheelScrollSensitivity: mouseWheelScrollSensitivity
-		};
+		});
 	}
-
-	public static createConfigurationChangedEvent(prevOpts:EditorCommon.IInternalEditorOptions, newOpts:EditorCommon.IInternalEditorOptions): EditorCommon.IConfigurationChangedEvent {
-		return {
-			layoutInfo: 					(!EditorLayoutProvider.layoutEqual(prevOpts.layoutInfo, newOpts.layoutInfo)),
-			stylingInfo: 					(!this._stylingInfoEqual(prevOpts.stylingInfo, newOpts.stylingInfo)),
-			wrappingInfo:					(!this._wrappingInfoEqual(prevOpts.wrappingInfo, newOpts.wrappingInfo)),
-			indentInfo:						(!this._indentInfoEqual(prevOpts.indentInfo, newOpts.indentInfo)),
-			observedOuterWidth:				(prevOpts.observedOuterWidth !== newOpts.observedOuterWidth),
-			observedOuterHeight:			(prevOpts.observedOuterHeight !== newOpts.observedOuterHeight),
-			lineHeight:						(prevOpts.lineHeight !== newOpts.lineHeight),
-			pageSize:						(prevOpts.pageSize !== newOpts.pageSize),
-			typicalHalfwidthCharacterWidth:	(prevOpts.typicalHalfwidthCharacterWidth !== newOpts.typicalHalfwidthCharacterWidth),
-			typicalFullwidthCharacterWidth:	(prevOpts.typicalFullwidthCharacterWidth !== newOpts.typicalFullwidthCharacterWidth),
-			fontSize:						(prevOpts.fontSize !== newOpts.fontSize),
-			lineNumbers:					(prevOpts.lineNumbers !== newOpts.lineNumbers),
-			selectOnLineNumbers:			(prevOpts.selectOnLineNumbers !== newOpts.selectOnLineNumbers),
-			glyphMargin:					(prevOpts.glyphMargin !== newOpts.glyphMargin),
-			revealHorizontalRightPadding:	(prevOpts.revealHorizontalRightPadding !== newOpts.revealHorizontalRightPadding),
-			roundedSelection:				(prevOpts.roundedSelection !== newOpts.roundedSelection),
-			theme:							(prevOpts.theme !== newOpts.theme),
-			readOnly:						(prevOpts.readOnly !== newOpts.readOnly),
-			scrollbar:						(!this._scrollbarOptsEqual(prevOpts.scrollbar, newOpts.scrollbar)),
-			overviewRulerLanes:				(prevOpts.overviewRulerLanes !== newOpts.overviewRulerLanes),
-			hideCursorInOverviewRuler:		(prevOpts.hideCursorInOverviewRuler !== newOpts.hideCursorInOverviewRuler),
-			scrollBeyondLastLine:			(prevOpts.scrollBeyondLastLine !== newOpts.scrollBeyondLastLine),
-			wrappingIndent:					(prevOpts.wrappingIndent !== newOpts.wrappingIndent),
-			wordWrapBreakBeforeCharacters:	(prevOpts.wordWrapBreakBeforeCharacters !== newOpts.wordWrapBreakBeforeCharacters),
-			wordWrapBreakAfterCharacters:	(prevOpts.wordWrapBreakAfterCharacters !== newOpts.wordWrapBreakAfterCharacters),
-			wordWrapBreakObtrusiveCharacters:(prevOpts.wordWrapBreakObtrusiveCharacters !== newOpts.wordWrapBreakObtrusiveCharacters),
-			tabFocusMode:					(prevOpts.tabFocusMode !== newOpts.tabFocusMode),
-			stopLineTokenizationAfter:		(prevOpts.stopLineTokenizationAfter !== newOpts.stopLineTokenizationAfter),
-			stopRenderingLineAfter:			(prevOpts.stopRenderingLineAfter !== newOpts.stopRenderingLineAfter),
-			longLineBoundary:				(prevOpts.longLineBoundary !== newOpts.longLineBoundary),
-			forcedTokenizationBoundary:		(prevOpts.forcedTokenizationBoundary !== newOpts.forcedTokenizationBoundary),
-			hover:							(prevOpts.hover !== newOpts.hover),
-			contextmenu:					(prevOpts.contextmenu !== newOpts.contextmenu),
-			quickSuggestions:				(prevOpts.quickSuggestions !== newOpts.quickSuggestions),
-			quickSuggestionsDelay:			(prevOpts.quickSuggestionsDelay !== newOpts.quickSuggestionsDelay),
-			iconsInSuggestions:				(prevOpts.iconsInSuggestions !== newOpts.iconsInSuggestions),
-			autoClosingBrackets:			(prevOpts.autoClosingBrackets !== newOpts.autoClosingBrackets),
-			formatOnType:					(prevOpts.formatOnType !== newOpts.formatOnType),
-			suggestOnTriggerCharacters:		(prevOpts.suggestOnTriggerCharacters !== newOpts.suggestOnTriggerCharacters),
-			selectionHighlight:				(prevOpts.selectionHighlight !== newOpts.selectionHighlight),
-			outlineMarkers:					(prevOpts.outlineMarkers !== newOpts.outlineMarkers),
-			referenceInfos:					(prevOpts.referenceInfos !== newOpts.referenceInfos)
-		};
-	}
-
-	private static _scrollbarOptsEqual(a:EditorCommon.IInternalEditorScrollbarOptions, b:EditorCommon.IInternalEditorScrollbarOptions): boolean {
-		return (
-			a.arrowSize === b.arrowSize
-			&& a.vertical === b.vertical
-			&& a.horizontal === b.horizontal
-			&& a.useShadows === b.useShadows
-			&& a.verticalHasArrows === b.verticalHasArrows
-			&& a.horizontalHasArrows === b.horizontalHasArrows
-			&& a.handleMouseWheel === b.handleMouseWheel
-			&& a.horizontalScrollbarSize === b.horizontalScrollbarSize
-			&& a.horizontalSliderSize === b.horizontalSliderSize
-			&& a.verticalScrollbarSize === b.verticalScrollbarSize
-			&& a.verticalSliderSize === b.verticalSliderSize
-			&& a.mouseWheelScrollSensitivity === b.mouseWheelScrollSensitivity
-		);
-	}
-
-	private static _stylingInfoEqual(a:EditorCommon.IEditorStyling, b:EditorCommon.IEditorStyling): boolean {
-		return (
-			a.editorClassName === b.editorClassName
-			&& a.fontFamily === b.fontFamily
-			&& a.fontSize === b.fontSize
-			&& a.lineHeight === b.lineHeight
-		);
-	}
-
-	private static _wrappingInfoEqual(a:EditorCommon.IEditorWrappingInfo, b:EditorCommon.IEditorWrappingInfo): boolean {
-		return (
-			a.isViewportWrapping === b.isViewportWrapping
-			&& a.wrappingColumn === b.wrappingColumn
-		);
-	}
-
-	private static _indentInfoEqual(a:EditorCommon.IInternalIndentationOptions, b:EditorCommon.IInternalIndentationOptions): boolean {
-		return (
-			a.insertSpaces === b.insertSpaces
-			&& a.tabSize === b.tabSize
-		);
-	}
-}
-
-export interface ICSSConfig {
-	typicalHalfwidthCharacterWidth:number;
-	typicalFullwidthCharacterWidth:number;
-	maxDigitWidth: number;
-	lineHeight:number;
-	font:string;
-	fontSize:number;
 }
 
 function toBoolean(value:any): boolean {
@@ -323,7 +287,7 @@ function toBooleanWithDefault(value:any, defaultValue:boolean): boolean {
 }
 
 function toFloat(source: any, defaultValue: number): number {
-	var r = parseFloat(source);
+	let r = parseFloat(source);
 	if (isNaN(r)) {
 		r = defaultValue;
 	}
@@ -331,7 +295,7 @@ function toFloat(source: any, defaultValue: number): number {
 }
 
 function toInteger(source:any, minimum?:number, maximum?:number): number {
-	var r = parseInt(source, 10);
+	let r = parseInt(source, 10);
 	if (isNaN(r)) {
 		r = 0;
 	}
@@ -344,21 +308,42 @@ function toInteger(source:any, minimum?:number, maximum?:number): number {
 	return r;
 }
 
+function toSortedIntegerArray(source:any): number[] {
+	if (!Array.isArray(source)) {
+		return [];
+	}
+	let arrSource = <any[]>source;
+	let r = arrSource.map(el => toInteger(el));
+	r.sort();
+	return r;
+}
+
+function wrappingIndentFromString(wrappingIndent:string): editorCommon.WrappingIndent {
+	if (wrappingIndent === 'indent') {
+		return editorCommon.WrappingIndent.Indent;
+	} else if (wrappingIndent === 'same') {
+		return editorCommon.WrappingIndent.Same;
+	} else {
+		return editorCommon.WrappingIndent.None;
+	}
+}
+
+function cursorStyleFromString(cursorStyle:string): editorCommon.TextEditorCursorStyle {
+	if (cursorStyle === 'line') {
+		return editorCommon.TextEditorCursorStyle.Line;
+	} else if (cursorStyle === 'block') {
+		return editorCommon.TextEditorCursorStyle.Block;
+	} else if (cursorStyle === 'underline') {
+		return editorCommon.TextEditorCursorStyle.Underline;
+	}
+	return editorCommon.TextEditorCursorStyle.Line;
+}
+
 function toIntegerWithDefault(source:any, defaultValue:number): number {
 	if (typeof source === 'undefined') {
 		return defaultValue;
 	}
 	return toInteger(source);
-}
-
-function toStringSet(source:any, allowedValues:string[], defaultValue:string): string {
-	if (typeof source !== 'string') {
-		return defaultValue;
-	}
-	if (allowedValues.indexOf(source) === -1) {
-		return defaultValue;
-	}
-	return source;
 }
 
 interface IValidatedIndentationOptions {
@@ -368,36 +353,36 @@ interface IValidatedIndentationOptions {
 	insertSpaces: boolean;
 }
 
-export interface IIndentationGuesser {
-	(tabSize:number): EditorCommon.IGuessedIndentation;
+export interface IElementSizeObserver {
+	startObserving(): void;
+	observe(dimension?:editorCommon.IDimension): void;
+	dispose(): void;
+	getWidth(): number;
+	getHeight(): number;
 }
 
-export class CommonEditorConfiguration extends EventEmitter implements EditorCommon.IConfiguration {
+export abstract class CommonEditorConfiguration extends Disposable implements editorCommon.IConfiguration {
 
-	public handlerDispatcher:EditorCommon.IHandlerDispatcher;
-	public editor:EditorCommon.IInternalEditorOptions;
+	public editor:editorCommon.InternalEditorOptions;
+	public editorClone:editorCommon.InternalEditorOptions;
 
 	protected _configWithDefaults:ConfigurationWithDefaults;
-	private _indentationGuesser:IIndentationGuesser;
-	private _cachedGuessedIndentationTabSize: number;
-	private _cachedGuessedIndentation:EditorCommon.IGuessedIndentation;
+	protected _elementSizeObserver: IElementSizeObserver;
 	private _isDominatedByLongLines:boolean;
 	private _lineCount:number;
 
-	constructor(options:any, indentationGuesser:IIndentationGuesser = null) {
-		super([
-			EditorCommon.EventType.ConfigurationChanged
-		]);
+	private _onDidChange = this._register(new Emitter<editorCommon.IConfigurationChangedEvent>());
+	public onDidChange: Event<editorCommon.IConfigurationChangedEvent> = this._onDidChange.event;
+
+	constructor(options:editorCommon.IEditorOptions, elementSizeObserver: IElementSizeObserver = null) {
+		super();
 		this._configWithDefaults = new ConfigurationWithDefaults(options);
-		this._indentationGuesser = indentationGuesser;
-		this._cachedGuessedIndentationTabSize = -1;
-		this._cachedGuessedIndentation = null;
+		this._elementSizeObserver = elementSizeObserver;
 		this._isDominatedByLongLines = false;
 		this._lineCount = 1;
-
-		this.handlerDispatcher = new HandlerDispatcher();
-
 		this.editor = this._computeInternalOptions();
+		this.editorClone = this.editor.clone();
+		this._register(EditorZoom.onDidChangeZoomLevel(_ => this._recomputeOptions()));
 	}
 
 	public dispose(): void {
@@ -405,68 +390,64 @@ export class CommonEditorConfiguration extends EventEmitter implements EditorCom
 	}
 
 	protected _recomputeOptions(): void {
-		let oldOpts = this.editor;
-		this.editor = this._computeInternalOptions();
-
-		let changeEvent = InternalEditorOptionsHelper.createConfigurationChangedEvent(oldOpts, this.editor);
-
-		let hasChanged = false;
-		for (let key in changeEvent) {
-			if (changeEvent.hasOwnProperty(key)) {
-				if (changeEvent[key]) {
-					hasChanged = true;
-					break;
-				}
-			}
-		}
-
-		if (hasChanged) {
-			this.emit(EditorCommon.EventType.ConfigurationChanged, changeEvent);
-		}
+		this._setOptions(this._computeInternalOptions());
 	}
 
-	public getRawOptions(): EditorCommon.IEditorOptions {
+	private _setOptions(newOptions:editorCommon.InternalEditorOptions): void {
+		if (this.editor && this.editor.equals(newOptions)) {
+			return;
+		}
+
+		let changeEvent = this.editor.createChangeEvent(newOptions);
+		this.editor = newOptions;
+		this.editorClone = this.editor.clone();
+		this._onDidChange.fire(changeEvent);
+	}
+
+	public getRawOptions(): editorCommon.IEditorOptions {
 		return this._configWithDefaults.getEditorOptions();
 	}
 
-	private _computeInternalOptions(): EditorCommon.IInternalEditorOptions {
+	private _computeInternalOptions(): editorCommon.InternalEditorOptions {
 		let opts = this._configWithDefaults.getEditorOptions();
 
-		let editorClassName = this._getEditorClassName(opts.theme);
-		let requestedFontFamily = opts.fontFamily || '';
-		let requestedFontSize = toInteger(opts.fontSize, 0, 100);
-		let requestedLineHeight = toInteger(opts.lineHeight, 0, 150);
+		let editorClassName = this._getEditorClassName(opts.theme, toBoolean(opts.fontLigatures));
+		let fontFamily = String(opts.fontFamily) || DefaultConfig.editor.fontFamily;
+		let fontSize = toInteger(opts.fontSize, 0, 100) || DefaultConfig.editor.fontSize;
 
-		let adjustedLineHeight = requestedLineHeight;
-		if (requestedFontSize > 0 && requestedLineHeight === 0) {
-			adjustedLineHeight = Math.round(1.3 * requestedFontSize);
+		let lineHeight = toInteger(opts.lineHeight, 0, 150);
+		if (lineHeight === 0) {
+			lineHeight = Math.round(GOLDEN_LINE_HEIGHT_RATIO * fontSize);
 		}
+		let editorZoomLevelMultiplier = 1 + (EditorZoom.getZoomLevel() * 0.1);
+		fontSize *= editorZoomLevelMultiplier;
+		lineHeight *= editorZoomLevelMultiplier;
 
-		let indentationOptions = CommonEditorConfiguration._computeIndentationOptions(opts, (tabSize) => this._guessIndentationOptionsCached(tabSize));
+		let disableTranslate3d = toBoolean(opts.disableTranslate3d);
+		let canUseTranslate3d = this._getCanUseTranslate3d();
+		if (disableTranslate3d) {
+			canUseTranslate3d = false;
+		}
 
 		return InternalEditorOptionsHelper.createInternalEditorOptions(
 			this.getOuterWidth(),
 			this.getOuterHeight(),
 			opts,
+			this.readConfiguration(new editorCommon.BareFontInfo({
+				fontFamily: fontFamily,
+				fontSize: fontSize,
+				lineHeight: lineHeight
+			})),
 			editorClassName,
-			requestedFontFamily,
-			requestedFontSize,
-			requestedLineHeight,
-			adjustedLineHeight,
-			this.readConfiguration(editorClassName, requestedFontFamily, requestedFontSize, adjustedLineHeight),
 			this._isDominatedByLongLines,
 			this._lineCount,
-			indentationOptions
+			canUseTranslate3d
 		);
 	}
 
-	public updateOptions(newOptions:EditorCommon.IEditorOptions): void {
+	public updateOptions(newOptions:editorCommon.IEditorOptions): void {
 		this._configWithDefaults.updateOptions(newOptions);
 		this._recomputeOptions();
-	}
-
-	protected _getEditorClassName(theme:string): string {
-		return 'monaco-editor';
 	}
 
 	public setIsDominatedByLongLines(isDominatedByLongLines:boolean): void {
@@ -479,139 +460,15 @@ export class CommonEditorConfiguration extends EventEmitter implements EditorCom
 		this._recomputeOptions();
 	}
 
-	public resetIndentationOptions(): void {
-		this._cachedGuessedIndentationTabSize = -1;
-		this._cachedGuessedIndentation = null;
-		this._recomputeOptions();
-	}
+	protected abstract _getEditorClassName(theme:string, fontLigatures:boolean): string;
 
-	private _guessIndentationOptionsCached(tabSize:number): EditorCommon.IGuessedIndentation {
-		if (!this._cachedGuessedIndentation || this._cachedGuessedIndentationTabSize !== tabSize) {
-			this._cachedGuessedIndentationTabSize = tabSize;
+	protected abstract getOuterWidth(): number;
 
-			if (this._indentationGuesser) {
-				this._cachedGuessedIndentation = this._indentationGuesser(tabSize);
-			} else {
-				this._cachedGuessedIndentation = null;
-			}
-		}
-		return this._cachedGuessedIndentation;
-	}
+	protected abstract getOuterHeight(): number;
 
-	private static _getValidatedIndentationOptions(opts: EditorCommon.IEditorOptions): IValidatedIndentationOptions {
-		let r: IValidatedIndentationOptions = {
-			tabSizeIsAuto: false,
-			tabSize: 4,
-			insertSpacesIsAuto: false,
-			insertSpaces: false
-		};
+	protected abstract _getCanUseTranslate3d(): boolean;
 
-		if (opts.tabSize === 'auto') {
-			r.tabSizeIsAuto = true;
-		} else {
-			r.tabSize = toInteger(opts.tabSize, 1, 20);
-		}
-
-		if (opts.insertSpaces === 'auto') {
-			r.insertSpacesIsAuto = true;
-		} else {
-			r.insertSpaces = toBoolean(opts.insertSpaces);
-		}
-
-		return r;
-	}
-
-	private static _computeIndentationOptions(allOpts: EditorCommon.IEditorOptions, indentationGuesser:IIndentationGuesser): EditorCommon.IInternalIndentationOptions {
-		let opts = this._getValidatedIndentationOptions(allOpts);
-
-		let guessedIndentation:EditorCommon.IGuessedIndentation = null;
-		if (opts.tabSizeIsAuto || opts.insertSpacesIsAuto) {
-			// We must use the indentation guesser to come up with the indentation options
-			guessedIndentation = indentationGuesser(opts.tabSize);
-		}
-
-		let r: EditorCommon.IInternalIndentationOptions = {
-			insertSpaces: opts.insertSpaces,
-			tabSize: opts.tabSize
-		};
-
-		if (guessedIndentation && opts.tabSizeIsAuto) {
-			r.tabSize = guessedIndentation.tabSize;
-		}
-		if (guessedIndentation && opts.insertSpacesIsAuto) {
-			r.insertSpaces = guessedIndentation.insertSpaces;
-		}
-
-		return r;
-	}
-
-	public getIndentationOptions(): EditorCommon.IInternalIndentationOptions {
-		return this.editor.indentInfo;
-	}
-
-	private _normalizeIndentationFromWhitespace(str:string): string {
-		var indentation = this.getIndentationOptions(),
-			spacesCnt = 0,
-			i:number;
-
-		for (i = 0; i < str.length; i++) {
-			if (str.charAt(i) === '\t') {
-				spacesCnt += indentation.tabSize;
-			} else {
-				spacesCnt++;
-			}
-		}
-
-		var result = '';
-		if (!indentation.insertSpaces) {
-			var tabsCnt = Math.floor(spacesCnt / indentation.tabSize);
-			spacesCnt = spacesCnt % indentation.tabSize;
-			for (i = 0; i < tabsCnt; i++) {
-				result += '\t';
-			}
-		}
-
-		for (i = 0; i < spacesCnt; i++) {
-			result += ' ';
-		}
-
-		return result;
-	}
-
-	public normalizeIndentation(str:string): string {
-		var firstNonWhitespaceIndex = Strings.firstNonWhitespaceIndex(str);
-		if (firstNonWhitespaceIndex === -1) {
-			firstNonWhitespaceIndex = str.length;
-		}
-		return this._normalizeIndentationFromWhitespace(str.substring(0, firstNonWhitespaceIndex)) + str.substring(firstNonWhitespaceIndex);
-	}
-
-	public getOneIndent(): string {
-		var indentation = this.getIndentationOptions();
-		if (indentation.insertSpaces) {
-			var result = '';
-			for (var i = 0; i < indentation.tabSize; i++) {
-				result += ' ';
-			}
-			return result;
-		} else {
-			return '\t';
-		}
-	}
-
-	protected getOuterWidth(): number {
-		throw new Error('Not implemented');
-	}
-
-	protected getOuterHeight(): number {
-		throw new Error('Not implemented');
-	}
-
-	protected readConfiguration(editorClassName: string, fontFamily: string, fontSize: number, lineHeight: number): ICSSConfig {
-		throw new Error('Not implemented');
-	}
-
-
+	protected abstract readConfiguration(styling: editorCommon.BareFontInfo): editorCommon.FontInfo;
 }
 
 /**
@@ -624,36 +481,36 @@ export class EditorConfiguration {
 	/**
 	 * Ask the provided configuration service to apply its configuration to the provided editor.
 	 */
-	public static apply(config:any, editor?:EditorCommon.IEditor): void;
-	public static apply(config:any, editor?:EditorCommon.IEditor[]): void;
+	public static apply(config:any, editor?:editorCommon.IEditor): void;
+	public static apply(config:any, editor?:editorCommon.IEditor[]): void;
 	public static apply(config:any, editorOrArray?:any): void {
 		if (!config) {
 			return;
 		}
 
-		var editors:EditorCommon.IEditor[] = editorOrArray;
+		let editors:editorCommon.IEditor[] = editorOrArray;
 		if (!Array.isArray(editorOrArray)) {
 			editors = [editorOrArray];
 		}
 
-		for (var i = 0; i < editors.length; i++) {
-			var editor = editors[i];
+		for (let i = 0; i < editors.length; i++) {
+			let editor = editors[i];
 
 			// Editor Settings (Code Editor, Diff, Terminal)
 			if (editor && typeof editor.updateOptions === 'function') {
-				var type = editor.getEditorType();
-				if (type !== EditorCommon.EditorType.ICodeEditor && type !== EditorCommon.EditorType.IDiffEditor) {
+				let type = editor.getEditorType();
+				if (type !== editorCommon.EditorType.ICodeEditor && type !== editorCommon.EditorType.IDiffEditor) {
 					continue;
 				}
 
-				var editorConfig = config[EditorConfiguration.EDITOR_SECTION];
-				if (type === EditorCommon.EditorType.IDiffEditor) {
-					var diffEditorConfig = config[EditorConfiguration.DIFF_EDITOR_SECTION];
+				let editorConfig = config[EditorConfiguration.EDITOR_SECTION];
+				if (type === editorCommon.EditorType.IDiffEditor) {
+					let diffEditorConfig = config[EditorConfiguration.DIFF_EDITOR_SECTION];
 					if (diffEditorConfig) {
 						if (!editorConfig) {
 							editorConfig = diffEditorConfig;
 						} else {
-							editorConfig = Objects.mixin(editorConfig, diffEditorConfig);
+							editorConfig = objects.mixin(editorConfig, diffEditorConfig);
 						}
 					}
 				}
@@ -667,12 +524,12 @@ export class EditorConfiguration {
 	}
 }
 
-var configurationRegistry = <ConfigurationRegistry.IConfigurationRegistry>Registry.as(ConfigurationRegistry.Extensions.Configuration);
-configurationRegistry.registerConfiguration({
+let configurationRegistry = <IConfigurationRegistry>Registry.as(Extensions.Configuration);
+let editorConfiguration:IConfigurationNode = {
 	'id': 'editor',
 	'order': 5,
 	'type': 'object',
-	'title': nls.localize('editorConfigurationTitle', "Editor configuration"),
+	'title': nls.localize('editorConfigurationTitle', "Editor"),
 	'properties' : {
 		'editor.fontFamily' : {
 			'type': 'string',
@@ -699,32 +556,36 @@ configurationRegistry.registerConfiguration({
 			'default': DefaultConfig.editor.glyphMargin,
 			'description': nls.localize('glyphMargin', "Controls visibility of the glyph margin")
 		},
+		'editor.rulers' : {
+			'type': 'array',
+			'items': {
+				'type': 'number'
+			},
+			'default': DefaultConfig.editor.rulers,
+			'description': nls.localize('rulers', "Columns at which to show vertical rulers")
+		},
+		'editor.wordSeparators' : {
+			'type': 'string',
+			'default': DefaultConfig.editor.wordSeparators,
+			'description': nls.localize('wordSeparators', "Characters that will be used as word separators when doing word related navigations or operations")
+		},
 		'editor.tabSize' : {
-			'oneOf': [
-				{
-					'type': 'number'
-				},
-				{
-					'type': 'string',
-					'enum': ['auto']
-				}
-			],
-			'default': DefaultConfig.editor.tabSize,
+			'type': 'number',
+			'default': DEFAULT_INDENTATION.tabSize,
 			'minimum': 1,
-			'description': nls.localize('tabSize', "Controls the rendering size of tabs in characters. Accepted values: \"auto\", 2, 4, 6, etc. If set to \"auto\", the value will be guessed when a file is opened.")
+			'description': nls.localize('tabSize', "The number of spaces a tab is equal to."),
+			'errorMessage': nls.localize('tabSize.errorMessage', "Expected 'number'. Note that the value \"auto\" has been replaced by the `editor.detectIndentation` setting.")
 		},
 		'editor.insertSpaces' : {
-			'oneOf': [
-				{
-					'type': 'boolean'
-				},
-				{
-					'type': 'string',
-					'enum': ['auto']
-				}
-			],
-			'default': DefaultConfig.editor.insertSpaces,
-			'description': nls.localize('insertSpaces', "Controls if the editor will insert spaces for tabs. Accepted values:  \"auto\", true, false. If set to \"auto\", the value will be guessed when a file is opened.")
+			'type': 'boolean',
+			'default': DEFAULT_INDENTATION.insertSpaces,
+			'description': nls.localize('insertSpaces', "Insert spaces when pressing Tab."),
+			'errorMessage': nls.localize('insertSpaces.errorMessage', "Expected 'boolean'. Note that the value \"auto\" has been replaced by the `editor.detectIndentation` setting.")
+		},
+		'editor.detectIndentation' : {
+			'type': 'boolean',
+			'default': DEFAULT_INDENTATION.detectIndentation,
+			'description': nls.localize('detectIndentation', "When opening a file, `editor.tabSize` and `editor.insertSpaces` will be detected based on the file contents.")
 		},
 		'editor.roundedSelection' : {
 			'type': 'boolean',
@@ -740,7 +601,7 @@ configurationRegistry.registerConfiguration({
 			'type': 'integer',
 			'default': DefaultConfig.editor.wrappingColumn,
 			'minimum': -1,
-			'description': nls.localize('wrappingColumn', "Controls after how many characters the editor will wrap to the next line. Setting this to 0 turns on viewport width wrapping")
+			'description': nls.localize('wrappingColumn', "Controls after how many characters the editor will wrap to the next line. Setting this to 0 turns on viewport width wrapping (word wrapping). Setting this to -1 forces the editor to never wrap.")
 		},
 		'editor.wrappingIndent' : {
 			'type': 'string',
@@ -764,6 +625,11 @@ configurationRegistry.registerConfiguration({
 			'minimum': 0,
 			'description': nls.localize('quickSuggestionsDelay', "Controls the delay in ms after which quick suggestions will show up")
 		},
+		'editor.parameterHints' : {
+			'type': 'boolean',
+			'default': DefaultConfig.editor.parameterHints,
+			'description': nls.localize('parameterHints', "Enables parameter hints")
+		},
 		'editor.autoClosingBrackets' : {
 			'type': 'boolean',
 			'default': DefaultConfig.editor.autoClosingBrackets,
@@ -778,6 +644,11 @@ configurationRegistry.registerConfiguration({
 			'type': 'boolean',
 			'default': DefaultConfig.editor.suggestOnTriggerCharacters,
 			'description': nls.localize('suggestOnTriggerCharacters', "Controls if suggestions should automatically show up when typing trigger characters")
+		},
+		'editor.acceptSuggestionOnEnter' : {
+			'type': 'boolean',
+			'default': DefaultConfig.editor.acceptSuggestionOnEnter,
+			'description': nls.localize('acceptSuggestionOnEnter', "Controls if suggestions should be accepted 'Enter' - in addition to 'Tab'. Helps to avoid ambiguity between inserting new lines or accepting suggestions.")
 		},
 		'editor.selectionHighlight' : {
 			'type': 'boolean',
@@ -794,6 +665,23 @@ configurationRegistry.registerConfiguration({
 			'default': 3,
 			'description': nls.localize('overviewRulerLanes', "Controls the number of decorations that can show up at the same position in the overview ruler")
 		},
+		'editor.cursorBlinking' : {
+			'type': 'string',
+			'enum': ['blink', 'visible', 'hidden'],
+			'default': DefaultConfig.editor.cursorBlinking,
+			'description': nls.localize('cursorBlinking', "Controls the cursor blinking animation, accepted values are 'blink', 'visible', and 'hidden'")
+		},
+		'editor.cursorStyle' : {
+			'type': 'string',
+			'enum': ['block', 'line'],
+			'default': DefaultConfig.editor.cursorStyle,
+			'description': nls.localize('cursorStyle', "Controls the cursor style, accepted values are 'block' and 'line'")
+		},
+		'editor.fontLigatures' : {
+			'type': 'boolean',
+			'default': DefaultConfig.editor.fontLigatures,
+			'description': nls.localize('fontLigatures', "Enables font ligatures")
+		},
 		'editor.hideCursorInOverviewRuler' : {
 			'type': 'boolean',
 			'default': DefaultConfig.editor.hideCursorInOverviewRuler,
@@ -804,10 +692,40 @@ configurationRegistry.registerConfiguration({
 			default: DefaultConfig.editor.renderWhitespace,
 			description: nls.localize('renderWhitespace', "Controls whether the editor should render whitespace characters")
 		},
+		'editor.renderControlCharacters': {
+			'type': 'boolean',
+			default: DefaultConfig.editor.renderControlCharacters,
+			description: nls.localize('renderControlCharacters', "Controls whether the editor should render control characters")
+		},
+		// 'editor.indentGuides': {
+		// 	'type': 'boolean',
+		// 	default: DefaultConfig.editor.indentGuides,
+		// 	description: nls.localize('indentGuides', "Controls whether the editor should render indent guides")
+		// },
 		'editor.referenceInfos' : {
 			'type': 'boolean',
 			'default': DefaultConfig.editor.referenceInfos,
 			'description': nls.localize('referenceInfos', "Controls if the editor shows reference information for the modes that support it")
+		},
+		'editor.folding' : {
+			'type': 'boolean',
+			'default': DefaultConfig.editor.folding,
+			'description': nls.localize('folding', "Controls whether the editor has code folding enabled")
+		},
+		'editor.useTabStops' : {
+			'type': 'boolean',
+			'default': DefaultConfig.editor.useTabStops,
+			'description': nls.localize('useTabStops', "Inserting and deleting whitespace follows tab stops")
+		},
+		'editor.trimAutoWhitespace' : {
+			'type': 'boolean',
+			'default': DEFAULT_TRIM_AUTO_WHITESPACE,
+			'description': nls.localize('trimAutoWhitespace', "Remove trailing auto inserted whitespace")
+		},
+		'editor.stablePeek' : {
+			'type': 'boolean',
+			'default': false,
+			'description': nls.localize('stablePeek', "Keep peek editors open even when double clicking their content or when hitting Escape.")
 		},
 		'diffEditor.renderSideBySide' : {
 			'type': 'boolean',
@@ -820,4 +738,14 @@ configurationRegistry.registerConfiguration({
 			'description': nls.localize('ignoreTrimWhitespace', "Controls if the diff editor shows changes in leading or trailing whitespace as diffs")
 		}
 	}
-});
+};
+
+if (platform.isLinux) {
+	editorConfiguration['properties']['editor.selectionClipboard'] = {
+		'type': 'boolean',
+		'default': DefaultConfig.editor.selectionClipboard,
+		'description': nls.localize('selectionClipboard', "Controls if the Linux primary clipboard should be supported.")
+	};
+}
+
+configurationRegistry.registerConfiguration(editorConfiguration);

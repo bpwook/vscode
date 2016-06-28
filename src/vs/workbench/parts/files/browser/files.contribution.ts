@@ -8,32 +8,30 @@
 import 'vs/css!./media/files.contribution';
 
 import URI from 'vs/base/common/uri';
-import {SUPPORTED_ENCODINGS} from 'vs/base/common/bits/encoding';
-import {IViewletRegistry, Extensions as ViewletExtensions, ViewletDescriptor, ToggleViewletAction} from 'vs/workbench/browser/viewlet';
+import {ViewletRegistry, Extensions as ViewletExtensions, ViewletDescriptor, ToggleViewletAction} from 'vs/workbench/browser/viewlet';
 import nls = require('vs/nls');
 import {SyncActionDescriptor} from 'vs/platform/actions/common/actions';
 import {Registry} from 'vs/platform/platform';
 import {IConfigurationRegistry, Extensions as ConfigurationExtensions} from 'vs/platform/configuration/common/configurationRegistry';
-import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/browser/actionRegistry';
+import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/common/actionRegistry';
 import {IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions} from 'vs/workbench/common/contributions';
 import {IEditorRegistry, Extensions as EditorExtensions, IEditorInputFactory} from 'vs/workbench/browser/parts/editor/baseEditor';
 import {EditorInput, IFileEditorInput} from 'vs/workbench/common/editor';
 import {FileEditorDescriptor} from 'vs/workbench/parts/files/browser/files';
+import {AutoSaveConfiguration, SUPPORTED_ENCODINGS} from 'vs/platform/files/common/files';
 import {FILE_EDITOR_INPUT_ID, VIEWLET_ID} from 'vs/workbench/parts/files/common/files';
 import {FileTracker} from 'vs/workbench/parts/files/browser/fileTracker';
-import {SaveParticipant} from 'vs/workbench/parts/files/browser/saveParticipant';
+import {SaveParticipant} from 'vs/workbench/parts/files/common/editors/saveParticipant';
 import {FileEditorInput} from 'vs/workbench/parts/files/browser/editors/fileEditorInput';
-import {HTMLFrameEditorInput} from 'vs/workbench/parts/files/browser/editors/htmlFrameEditorInput';
 import {TextFileEditor} from 'vs/workbench/parts/files/browser/editors/textFileEditor';
 import {BinaryFileEditor} from 'vs/workbench/parts/files/browser/editors/binaryFileEditor';
-import {IInstantiationService, INullService} from 'vs/platform/instantiation/common/instantiation';
+import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {SyncDescriptor, AsyncDescriptor} from 'vs/platform/instantiation/common/descriptors';
-import {registerSingleton} from 'vs/platform/instantiation/common/extensions';
-import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
 import {IKeybindings} from 'vs/platform/keybinding/common/keybindingService';
 import {IViewletService} from 'vs/workbench/services/viewlet/common/viewletService';
 import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
 import {KeyMod, KeyCode} from 'vs/base/common/keyCodes';
+import * as platform from 'vs/base/common/platform';
 
 // Viewlet Action
 export class OpenExplorerViewletAction extends ToggleViewletAction {
@@ -51,40 +49,42 @@ export class OpenExplorerViewletAction extends ToggleViewletAction {
 }
 
 // Register Viewlet
-(<IViewletRegistry>Registry.as(ViewletExtensions.Viewlets)).registerViewlet(new ViewletDescriptor(
+(<ViewletRegistry>Registry.as(ViewletExtensions.Viewlets)).registerViewlet(new ViewletDescriptor(
 	'vs/workbench/parts/files/browser/explorerViewlet',
 	'ExplorerViewlet',
 	VIEWLET_ID,
-	nls.localize('explore', "Explore"),
+	nls.localize('explore', "Explorer"),
 	'explore',
 	0
 ));
 
-(<IViewletRegistry>Registry.as(ViewletExtensions.Viewlets)).setDefaultViewletId(VIEWLET_ID);
+(<ViewletRegistry>Registry.as(ViewletExtensions.Viewlets)).setDefaultViewletId(VIEWLET_ID);
 
 let openViewletKb: IKeybindings = {
 	primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KEY_E
 };
 
 // Register Action to Open Viewlet
-(<IWorkbenchActionRegistry>Registry.as(ActionExtensions.WorkbenchActions)).registerWorkbenchAction(
+const registry = <IWorkbenchActionRegistry>Registry.as(ActionExtensions.WorkbenchActions);
+registry.registerWorkbenchAction(
 	new SyncActionDescriptor(OpenExplorerViewletAction, OpenExplorerViewletAction.ID, OpenExplorerViewletAction.LABEL, openViewletKb),
+	'View: Show Explorer',
 	nls.localize('view', "View")
 );
 
 // Register file editors
 (<IEditorRegistry>Registry.as(EditorExtensions.Editors)).registerEditor(
 	new FileEditorDescriptor(
-		TextFileEditor.ID, // explicit dependency because we dont want these editors lazy loaded
+		TextFileEditor.ID, // explicit dependency because we don't want these editors lazy loaded
 		nls.localize('textFileEditor', "Text File Editor"),
 		'vs/workbench/parts/files/browser/editors/textFileEditor',
 		'TextFileEditor',
 		[
 			'text/*',
 
-		// In case the mime type is unknown, we prefer the text file editor over the binary editor to leave a chance
-		// of opening a potential text file properly. The resolution of the file in the text file editor will fail
-		// early on in case the file is actually binary, to prevent downloading a potential large binary file.
+			// In case the mime type is unknown, we prefer the text file editor over the binary editor to leave a chance
+			// of opening a potential text file properly. The resolution of the file in the text file editor will fail
+			// early on in case the file is actually binary, to prevent downloading a potential large binary file.
 			'application/unknown'
 		]
 	),
@@ -95,7 +95,7 @@ let openViewletKb: IKeybindings = {
 
 (<IEditorRegistry>Registry.as(EditorExtensions.Editors)).registerEditor(
 	new FileEditorDescriptor(
-		BinaryFileEditor.ID, // explicit dependency because we dont want these editors lazy loaded
+		BinaryFileEditor.ID, // explicit dependency because we don't want these editors lazy loaded
 		nls.localize('binaryFileEditor', "Binary File Editor"),
 		'vs/workbench/parts/files/browser/editors/binaryFileEditor',
 		'BinaryFileEditor',
@@ -121,19 +121,17 @@ let descriptor = new AsyncDescriptor<IFileEditorInput>('vs/workbench/parts/files
 
 interface ISerializedFileInput {
 	resource: string;
-	mime: string;
 }
 
 // Register Editor Input Factory
 class FileEditorInputFactory implements IEditorInputFactory {
 
-	constructor(@INullService ns) {}
+	constructor() { }
 
 	public serialize(editorInput: EditorInput): string {
 		let fileEditorInput = <FileEditorInput>editorInput;
 		let fileInput: ISerializedFileInput = {
-			resource: fileEditorInput.getResource().toString(),
-			mime: fileEditorInput.getMime()
+			resource: fileEditorInput.getResource().toString()
 		};
 
 		return JSON.stringify(fileInput);
@@ -142,29 +140,11 @@ class FileEditorInputFactory implements IEditorInputFactory {
 	public deserialize(instantiationService: IInstantiationService, serializedEditorInput: string): EditorInput {
 		let fileInput: ISerializedFileInput = JSON.parse(serializedEditorInput);
 
-		return instantiationService.createInstance(FileEditorInput, URI.parse(fileInput.resource), fileInput.mime, void 0);
+		return instantiationService.createInstance(FileEditorInput, URI.parse(fileInput.resource), void 0, void 0);
 	}
 }
 
 (<IEditorRegistry>Registry.as(EditorExtensions.Editors)).registerEditorInputFactory(FILE_EDITOR_INPUT_ID, FileEditorInputFactory);
-
-// Register HTML Frame Editor Input Factory
-class HTMLFrameEditorInputFactory implements IEditorInputFactory {
-
-	constructor(@INullService ns) {}
-
-	public serialize(editorInput: EditorInput): string {
-		let htmlInput = <HTMLFrameEditorInput>editorInput;
-
-		return htmlInput.getResource().toString();
-	}
-
-	public deserialize(instantiationService: IInstantiationService, resourceRaw: string): EditorInput {
-		return instantiationService.createInstance(HTMLFrameEditorInput, URI.parse(resourceRaw));
-	}
-}
-
-(<IEditorRegistry>Registry.as(EditorExtensions.Editors)).registerEditorInputFactory(HTMLFrameEditorInput.ID, HTMLFrameEditorInputFactory);
 
 // Register File Tracker
 (<IWorkbenchContributionsRegistry>Registry.as(WorkbenchExtensions.Workbench)).registerWorkbenchContribution(
@@ -181,15 +161,14 @@ let configurationRegistry = <IConfigurationRegistry>Registry.as(ConfigurationExt
 
 configurationRegistry.registerConfiguration({
 	'id': 'files',
-	'order': 7,
-	'title': nls.localize('filesConfigurationTitle', "Files configuration"),
+	'order': 9,
+	'title': nls.localize('filesConfigurationTitle', "Files"),
 	'type': 'object',
 	'properties': {
 		'files.exclude': {
-			'id': 'glob-pattern',
 			'type': 'object',
 			'description': nls.localize('exclude', "Configure glob patterns for excluding files and folders."),
-			'default': { '**/.git': true, '**/.DS_Store': true },
+			'default': { '**/.git': true, '**/.svn': true, '**/.DS_Store': true },
 			'additionalProperties': {
 				'anyOf': [
 					{
@@ -210,34 +189,68 @@ configurationRegistry.registerConfiguration({
 				]
 			}
 		},
+		'files.associations': {
+			'type': 'object',
+			'description': nls.localize('associations', "Configure file associations to languages (e.g. \"*.extension\": \"html\"). These have precedence over the default associations of the languages installed."),
+		},
 		'files.encoding': {
 			'type': 'string',
 			'enum': Object.keys(SUPPORTED_ENCODINGS),
 			'default': 'utf8',
 			'description': nls.localize('encoding', "The default character set encoding to use when reading and writing files."),
 		},
+		'files.eol': {
+			'type': 'string',
+			'enum': [
+				'\n',
+				'\r\n'
+			],
+			'default': (platform.isLinux || platform.isMacintosh) ? '\n' : '\r\n',
+			'description': nls.localize('eol', "The default end of line character."),
+		},
 		'files.trimTrailingWhitespace': {
 			'type': 'boolean',
 			'default': false,
 			'description': nls.localize('trimTrailingWhitespace', "When enabled, will trim trailing whitespace when you save a file.")
+		},
+		'files.autoSave': {
+			'type': 'string',
+			'enum': [AutoSaveConfiguration.OFF, AutoSaveConfiguration.AFTER_DELAY, AutoSaveConfiguration.ON_FOCUS_CHANGE],
+			'default': AutoSaveConfiguration.OFF,
+			'description': nls.localize('autoSave', "Controls auto save of dirty files. Accepted values:  \"{0}\", \"{1}\", \"{2}\". If set to \"{3}\" you can configure the delay in \"files.autoSaveDelay\".", AutoSaveConfiguration.OFF, AutoSaveConfiguration.AFTER_DELAY, AutoSaveConfiguration.ON_FOCUS_CHANGE, AutoSaveConfiguration.AFTER_DELAY)
+		},
+		'files.autoSaveDelay': {
+			'type': 'number',
+			'default': 1000,
+			'description': nls.localize('autoSaveDelay', "Controls the delay in ms after which a dirty file is saved automatically. Only applies when \"files.autoSave\" is set to \"{0}\"", AutoSaveConfiguration.AFTER_DELAY)
+		},
+		'files.watcherExclude': {
+			'type': 'object',
+			'default': (platform.isLinux || platform.isMacintosh) ? { '**/.git/objects/**': true, '**/node_modules/**': true } : { '**/.git/objects/**': true },
+			'description': nls.localize('watcherExclude', "Configure glob patterns of file paths to exclude from file watching. Changing this setting requires a restart. When you experience Code consuming lots of cpu time on startup, you can exclude large folders to reduce the initial load.")
 		}
 	}
 });
 
 configurationRegistry.registerConfiguration({
 	'id': 'explorer',
-	'order': 8,
-	'title': nls.localize('explorerConfigurationTitle', "File Explorer configuration"),
+	'order': 10,
+	'title': nls.localize('explorerConfigurationTitle', "File Explorer"),
 	'type': 'object',
 	'properties': {
-		'explorer.workingFiles.maxVisible': {
+		'explorer.openEditors.visible': {
 			'type': 'number',
-			'description': nls.localize('maxVisible', "Maximum number of working files to show before scrollbars appear."),
+			'description': nls.localize('openEditorsVisible', "Number of editors shown in the Open Editors pane. Set it to 0 to hide the pane."),
 			'default': 9
 		},
-		'explorer.workingFiles.dynamicHeight': {
+		'explorer.openEditors.dynamicHeight': {
 			'type': 'boolean',
-			'description': nls.localize('dynamicHeight', "Controls if the height of the working files section should adapt dynamically to the number of elements or not."),
+			'description': nls.localize('dynamicHeight', "Controls if the height of the open editors section should adapt dynamically to the number of elements or not."),
+			'default': true
+		},
+		'explorer.autoReveal': {
+			'type': 'boolean',
+			'description': nls.localize('autoReveal', "Controls if the explorer should automatically reveal files when opening them."),
 			'default': true
 		}
 	}

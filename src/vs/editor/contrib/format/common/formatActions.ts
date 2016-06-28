@@ -4,57 +4,46 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
+import * as nls from 'vs/nls';
+import * as arrays from 'vs/base/common/arrays';
+import {KeyCode, KeyMod} from 'vs/base/common/keyCodes';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
 import {TPromise} from 'vs/base/common/winjs.base';
-import EditorCommon = require('vs/editor/common/editorCommon');
-import lifecycle = require('vs/base/common/lifecycle');
-import arrays = require('vs/base/common/arrays');
-import nls = require('vs/nls');
+import {EditorAction} from 'vs/editor/common/editorAction';
+import {Behaviour} from 'vs/editor/common/editorActionEnablement';
+import * as editorCommon from 'vs/editor/common/editorCommon';
 import {CommonEditorRegistry, ContextKey, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
-import {EditorAction, Behaviour} from 'vs/editor/common/editorAction';
-import formatCommand = require('./formatCommand');
-import {Range} from 'vs/editor/common/core/range';
-import {INullService} from 'vs/platform/instantiation/common/instantiation';
-import {KeyMod, KeyCode} from 'vs/base/common/keyCodes';
-import {FormatOnTypeRegistry, FormatRegistry, IFormattingSupport} from '../common/format';
+import {DocumentFormattingEditProviderRegistry, DocumentRangeFormattingEditProviderRegistry, OnTypeFormattingEditProviderRegistry} from 'vs/editor/common/modes';
+import {getOnTypeFormattingEdits, getDocumentFormattingEdits, getDocumentRangeFormattingEdits} from '../common/format';
+import {EditOperationsCommand} from './formatCommand';
+import {Selection} from 'vs/editor/common/core/selection';
 
-interface IFormatOnTypeResult {
-	range: EditorCommon.IEditorRange;
-	id: string;
-	lineText: string;
-}
-
-class FormatOnType implements EditorCommon.IEditorContribution {
+class FormatOnType implements editorCommon.IEditorContribution {
 
 	public static ID = 'editor.contrib.autoFormat';
 
-	private editor: EditorCommon.ICommonCodeEditor;
-	private formattingOptions: EditorCommon.IInternalIndentationOptions;
-	private callOnDispose: lifecycle.IDisposable[];
-	private callOnModel: Function[];
+	private editor: editorCommon.ICommonCodeEditor;
+	private callOnDispose: IDisposable[];
+	private callOnModel: IDisposable[];
 
-	constructor(editor: EditorCommon.ICommonCodeEditor, @INullService ns: INullService) {
+	constructor(editor: editorCommon.ICommonCodeEditor) {
 		this.editor = editor;
 		this.callOnDispose = [];
 		this.callOnModel = [];
 
-		this.callOnDispose.push(editor.addListener2(EditorCommon.EventType.ConfigurationChanged, () => this.update()));
-		this.callOnDispose.push(editor.addListener2(EditorCommon.EventType.ModelChanged, () => this.update()));
-		this.callOnDispose.push(editor.addListener2(EditorCommon.EventType.ModelModeChanged, () => this.update()));
-		this.callOnDispose.push(editor.addListener2(EditorCommon.EventType.ModelModeSupportChanged,(e: EditorCommon.IModeSupportChangedEvent) => {
-			if (e.formattingSupport) {
-				this.update();
-			}
-		}));
-		this.callOnDispose.push(FormatOnTypeRegistry.onDidChange(this.update, this));
+		this.callOnDispose.push(editor.onDidChangeConfiguration(() => this.update()));
+		this.callOnDispose.push(editor.onDidChangeModel(() => this.update()));
+		this.callOnDispose.push(editor.onDidChangeModelMode(() => this.update()));
+		this.callOnDispose.push(OnTypeFormattingEditProviderRegistry.onDidChange(this.update, this));
 	}
 
 	private update(): void {
 
 		// clean up
-		this.callOnModel = lifecycle.cAll(this.callOnModel);
+		this.callOnModel = dispose(this.callOnModel);
 
 		// we are disabled
-		if (!this.editor.getConfiguration().formatOnType) {
+		if (!this.editor.getConfiguration().contribInfo.formatOnType) {
 			return;
 		}
 
@@ -66,21 +55,18 @@ class FormatOnType implements EditorCommon.IEditorContribution {
 		var model = this.editor.getModel();
 
 		// no support
-		var support = FormatOnTypeRegistry.ordered(model)[0];
+		var [support] = OnTypeFormattingEditProviderRegistry.ordered(model);
 		if (!support || !support.autoFormatTriggerCharacters) {
 			return;
 		}
 
-		// remember options
-		this.formattingOptions = this.editor.getIndentationOptions();
-
 		// register typing listeners that will trigger the format
-		support.autoFormatTriggerCharacters.forEach(char => {
-			this.callOnModel.push(this.editor.addTypingListener(char, this.trigger.bind(this, support, char)));
+		support.autoFormatTriggerCharacters.forEach(ch => {
+			this.callOnModel.push(this.editor.addTypingListener(ch, this.trigger.bind(this, ch)));
 		});
 	}
 
-	private trigger(support: IFormattingSupport, char: string): void {
+	private trigger(ch: string): void {
 
 		if (this.editor.getSelections().length > 1) {
 			return;
@@ -93,41 +79,46 @@ class FormatOnType implements EditorCommon.IEditorContribution {
 		// install a listener that checks if edits happens before the
 		// position on which we format right now. Iff so, we won't
 		// apply the format edits
-		var unbind = this.editor.addListener(EditorCommon.EventType.ModelContentChanged,(e: EditorCommon.IModelContentChangedEvent) => {
-			if (e.changeType === EditorCommon.EventType.ModelContentChangedFlush) {
+		var unbind = this.editor.onDidChangeModelRawContent((e: editorCommon.IModelContentChangedEvent) => {
+			if (e.changeType === editorCommon.EventType.ModelRawContentChangedFlush) {
 				// a model.setValue() was called
 				canceled = true;
-			} else if (e.changeType === EditorCommon.EventType.ModelContentChangedLineChanged) {
-				var changedLine = (<EditorCommon.IModelContentChangedLineChangedEvent>e).lineNumber;
+			} else if (e.changeType === editorCommon.EventType.ModelRawContentChangedLineChanged) {
+				var changedLine = (<editorCommon.IModelContentChangedLineChangedEvent>e).lineNumber;
 				canceled = changedLine <= position.lineNumber;
 
-			} else if (e.changeType === EditorCommon.EventType.ModelContentChangedLinesInserted) {
-				var insertLine = (<EditorCommon.IModelContentChangedLinesInsertedEvent>e).fromLineNumber;
+			} else if (e.changeType === editorCommon.EventType.ModelRawContentChangedLinesInserted) {
+				var insertLine = (<editorCommon.IModelContentChangedLinesInsertedEvent>e).fromLineNumber;
 				canceled = insertLine <= position.lineNumber;
 
-			} else if (e.changeType === EditorCommon.EventType.ModelContentChangedLinesDeleted) {
-				var deleteLine2 = (<EditorCommon.IModelContentChangedLinesDeletedEvent>e).toLineNumber;
+			} else if (e.changeType === editorCommon.EventType.ModelRawContentChangedLinesDeleted) {
+				var deleteLine2 = (<editorCommon.IModelContentChangedLinesDeletedEvent>e).toLineNumber;
 				canceled = deleteLine2 <= position.lineNumber;
 			}
 
 			if (canceled) {
 				// cancel only once
-				unbind();
+				unbind.dispose();
 			}
 		});
 
-		support.formatAfterKeystroke(model.getAssociatedResource(), position, char, this.formattingOptions).then((edits) => {
+		let modelOpts = model.getOptions();
 
-			unbind();
+		getOnTypeFormattingEdits(model, position, ch, {
+			tabSize: modelOpts.tabSize,
+			insertSpaces: modelOpts.insertSpaces
+		}).then(edits => {
+
+			unbind.dispose();
 
 			if (canceled || arrays.isFalsyOrEmpty(edits)) {
 				return;
 			}
 
-			this.editor.executeCommand(this.getId(), new formatCommand.EditOperationsCommand(edits, this.editor.getSelection()));
+			this.editor.executeCommand(this.getId(), new EditOperationsCommand(edits, this.editor.getSelection()));
 
 		},(err) => {
-			unbind();
+			unbind.dispose();
 			throw err;
 		});
 	}
@@ -137,10 +128,8 @@ class FormatOnType implements EditorCommon.IEditorContribution {
 	}
 
 	public dispose(): void {
-		this.callOnDispose = lifecycle.disposeAll(this.callOnDispose);
-		while (this.callOnModel.length > 0) {
-			this.callOnModel.pop()();
-		}
+		this.callOnDispose = dispose(this.callOnDispose);
+		this.callOnModel = dispose(this.callOnModel);
 	}
 }
 
@@ -148,16 +137,19 @@ export class FormatAction extends EditorAction {
 
 	public static ID = 'editor.action.format';
 
-	private _disposable: lifecycle.IDisposable;
+	private _disposables: IDisposable[];
 
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor, @INullService ns) {
+	constructor(descriptor:editorCommon.IEditorActionDescriptorData, editor:editorCommon.ICommonCodeEditor) {
 		super(descriptor, editor, Behaviour.WidgetFocus | Behaviour.Writeable | Behaviour.UpdateOnModelChange | Behaviour.ShowInContextMenu);
-		this._disposable = FormatRegistry.onDidChange(() => this.resetEnablementState());
+		this._disposables = [
+			DocumentFormattingEditProviderRegistry.onDidChange(() => this.resetEnablementState()),
+			DocumentRangeFormattingEditProviderRegistry.onDidChange(() => this.resetEnablementState())
+		];
 	}
 
 	public dispose() {
 		super.dispose();
-		this._disposable.dispose();
+		this._disposables = dispose(this._disposables);
 	}
 
 	public getGroupId(): string {
@@ -165,44 +157,42 @@ export class FormatAction extends EditorAction {
 	}
 
 	public isSupported(): boolean {
-		return FormatRegistry.has(this.editor.getModel()) && super.isSupported();
+		return (
+			(
+				DocumentFormattingEditProviderRegistry.has(this.editor.getModel())
+				|| DocumentRangeFormattingEditProviderRegistry.has(this.editor.getModel())
+			)
+			&& super.isSupported()
+		);
 	}
 
 	public run(): TPromise<boolean> {
 
-		var model = this.editor.getModel(),
-			formattingSupport = FormatRegistry.ordered(model)[0],
-			canFormatRange = typeof formattingSupport.formatRange === 'function',
-			canFormatDocument = typeof formattingSupport.formatDocument === 'function',
-			editorSelection = this.editor.getSelection();
+		const model = this.editor.getModel(),
+			editorSelection = this.editor.getSelection(),
+			modelOpts = model.getOptions(),
+			options = {
+				tabSize: modelOpts.tabSize,
+				insertSpaces: modelOpts.insertSpaces,
+			};
 
-		var options = this.editor.getIndentationOptions(),
-			formattingPromise: TPromise<EditorCommon.ISingleEditOperation[]>;
+		let formattingPromise: TPromise<editorCommon.ISingleEditOperation[]>;
 
-		if(canFormatRange) {
-			// format a selection/range
-			var formatRange: EditorCommon.IEditorRange = editorSelection;
-			if(!formatRange.isEmpty()) {
-				// Fix the selection to include the entire line to improve formatting results
-				formatRange.startColumn = 1;
-			} else {
-				formatRange = model.getFullModelRange();
-			}
-			formattingPromise = formattingSupport.formatRange(model.getAssociatedResource(), formatRange, options);
-
-		} else if(canFormatDocument) {
-			// format the whole document
-			formattingPromise = formattingSupport.formatDocument(model.getAssociatedResource(), options);
+		if (editorSelection.isEmpty()) {
+			formattingPromise = getDocumentFormattingEdits(model, options);
 		} else {
-			// broken support?
+			formattingPromise = getDocumentRangeFormattingEdits(model, editorSelection, options);
+		}
+
+		if (!formattingPromise) {
 			return TPromise.as(false);
 		}
 
 		// Capture the state of the editor
-		var state = this.editor.captureState(EditorCommon.CodeEditorStateFlag.Value, EditorCommon.CodeEditorStateFlag.Position);
+		var state = this.editor.captureState(editorCommon.CodeEditorStateFlag.Value, editorCommon.CodeEditorStateFlag.Position);
 
 		// Receive formatted value from worker
-		return formattingPromise.then((result: EditorCommon.ISingleEditOperation[]) => {
+		return formattingPromise.then((result: editorCommon.ISingleEditOperation[]) => {
 
 			if (!state.validate(this.editor)) {
 				return false;
@@ -218,13 +208,13 @@ export class FormatAction extends EditorAction {
 		});
 	}
 
-	public apply(editor: EditorCommon.ICommonCodeEditor, editorSelection: EditorCommon.IEditorSelection, value: EditorCommon.ISingleEditOperation[]): void {
-		var state: EditorCommon.IEditorViewState = null;
+	public apply(editor: editorCommon.ICommonCodeEditor, editorSelection: Selection, value: editorCommon.ISingleEditOperation[]): void {
+		var state: editorCommon.IEditorViewState = null;
 
 		if (editorSelection.isEmpty()) {
 			state = editor.saveViewState();
 		}
-		var command = new formatCommand.EditOperationsCommand(value, editorSelection);
+		var command = new EditOperationsCommand(value, editorSelection);
 		editor.executeCommand(this.id, command);
 
 		if (state) {
@@ -238,5 +228,5 @@ CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(FormatActio
 	context: ContextKey.EditorTextFocus,
 	primary: KeyMod.Shift | KeyMod.Alt | KeyCode.KEY_F,
 	linux: { primary:KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KEY_I }
-}));
+}, 'Format Code'));
 CommonEditorRegistry.registerEditorContribution(FormatOnType);

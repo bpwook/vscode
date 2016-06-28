@@ -4,15 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import Events = require('vs/base/common/eventEmitter');
-import Assert = require('vs/base/common/assert');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Objects = require('vs/base/common/objects');
+import * as assert from 'vs/base/common/assert';
+import {EventEmitter} from 'vs/base/common/eventEmitter';
+import * as objects from 'vs/base/common/objects';
 import {Range} from 'vs/editor/common/core/range';
+import {ICommonDiffEditor, ICursorPositionChangedEvent, ILineChange} from 'vs/editor/common/editorCommon';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
 
 interface IDiffRange {
 	rhs:boolean;
-	range:EditorCommon.IEditorRange;
+	range:Range;
 }
 
 export interface Options {
@@ -30,28 +31,28 @@ var defaultOptions:Options = {
 /**
  * Create a new diff navigator for the provided diff editor.
  */
-export class DiffNavigator extends Events.EventEmitter {
+export class DiffNavigator extends EventEmitter {
 
 	public static Events = {
 		UPDATED: 'navigation.updated'
 	};
 
-	private editor:EditorCommon.ICommonDiffEditor;
+	private editor:ICommonDiffEditor;
 	private options:Options;
 	private disposed:boolean;
-	private toUnbind:Events.ListenerUnbind[];
+	private toUnbind:IDisposable[];
 
 	private nextIdx:number;
 	private ranges:IDiffRange[];
 	private ignoreSelectionChange:boolean;
 	private revealFirst:boolean;
 
-	constructor(editor:EditorCommon.ICommonDiffEditor, options:Options={}) {
+	constructor(editor:ICommonDiffEditor, options:Options={}) {
 		super([
 			DiffNavigator.Events.UPDATED
 		]);
 		this.editor = editor;
-		this.options = Objects.mixin(options, defaultOptions, false);
+		this.options = objects.mixin(options, defaultOptions, false);
 
 		this.disposed = false;
 		this.toUnbind = [];
@@ -62,11 +63,11 @@ export class DiffNavigator extends Events.EventEmitter {
 		this.revealFirst = this.options.alwaysRevealFirst;
 
 		// hook up to diff editor for diff, disposal, and caret move
-		this.toUnbind.push(this.editor.addListener(EditorCommon.EventType.Disposed, () => this.dispose() ));
-		this.toUnbind.push(this.editor.addListener(EditorCommon.EventType.DiffUpdated, () => this.onDiffUpdated() ));
+		this.toUnbind.push(this.editor.onDidDispose(() => this.dispose() ));
+		this.toUnbind.push(this.editor.onDidUpdateDiff(() => this.onDiffUpdated() ));
 
 		if(this.options.followsCaret) {
-			this.toUnbind.push(this.editor.getModifiedEditor().addListener(EditorCommon.EventType.CursorPositionChanged, (e:EditorCommon.ICursorPositionChangedEvent) => {
+			this.toUnbind.push(this.editor.getModifiedEditor().onDidChangeCursorPosition((e:ICursorPositionChangedEvent) => {
 				if(this.ignoreSelectionChange) {
 					return;
 				}
@@ -74,7 +75,7 @@ export class DiffNavigator extends Events.EventEmitter {
 			}));
 		}
 		if(this.options.alwaysRevealFirst) {
-			this.toUnbind.push(this.editor.getModifiedEditor().addListener(EditorCommon.EventType.ModelChanged, (e) => {
+			this.toUnbind.push(this.editor.getModifiedEditor().onDidChangeModel((e) => {
 				this.revealFirst = true;
 			}));
 		}
@@ -104,7 +105,7 @@ export class DiffNavigator extends Events.EventEmitter {
 		}
 	}
 
-	private compute(lineChanges:EditorCommon.ILineChange[]):void {
+	private compute(lineChanges:ILineChange[]):void {
 
 		// new ranges
 		this.ranges = [];
@@ -169,7 +170,7 @@ export class DiffNavigator extends Events.EventEmitter {
 	}
 
 	private move(fwd:boolean):void {
-		Assert.ok(!this.disposed, 'Illegal State - diff navigator has been disposed');
+		assert.ok(!this.disposed, 'Illegal State - diff navigator has been disposed');
 
 		if(!this.canNavigate()) {
 			return;
@@ -214,9 +215,7 @@ export class DiffNavigator extends Events.EventEmitter {
 	}
 
 	public dispose():void {
-		while(this.toUnbind.length > 0) {
-			this.toUnbind.pop()();
-		}
+		this.toUnbind = dispose(this.toUnbind);
 		this.ranges = null;
 		this.disposed = true;
 

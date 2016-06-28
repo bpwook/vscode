@@ -10,8 +10,7 @@ import nls = require('vs/nls');
 import Lifecycle = require('vs/base/common/lifecycle');
 import EventEmitter = require('vs/base/common/eventEmitter');
 import DOM = require('vs/base/browser/dom');
-import Errors = require('vs/base/common/errors');
-import Keyboard = require('vs/base/browser/keyboardEvent');
+import {Button} from 'vs/base/browser/ui/button/button';
 import WinJS = require('vs/base/common/winjs.base');
 import Builder = require('vs/base/browser/builder');
 import Actions = require('vs/base/common/actions');
@@ -19,62 +18,13 @@ import InputBox = require('vs/base/browser/ui/inputbox/inputBox');
 import git = require('vs/workbench/parts/git/common/git');
 import GitView = require('vs/workbench/parts/git/browser/views/view');
 import GitActions = require('vs/workbench/parts/git/browser/gitActions');
-import Severity from 'vs/base/common/severity';
 import {IFileService} from 'vs/platform/files/common/files';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IMessageService} from 'vs/platform/message/common/message';
-import {ISelection, Selection} from 'vs/platform/selection/common/selection';
 
 import IGitService = git.IGitService;
 
 var $ = Builder.$;
-
-export class Button extends EventEmitter.EventEmitter {
-
-	private $el: Builder.Builder;
-
-	constructor(container: Builder.Builder);
-	constructor(container: HTMLElement);
-	constructor(container: any) {
-		super();
-
-		this.$el = $('a.button.clone').href('#').appendTo(container);
-
-		this.$el.on('click', (e) => {
-			if (!this.enabled) {
-				DOM.EventHelper.stop(e);
-				return;
-			}
-
-			this.emit('click', e);
-		});
-	}
-
-	public set label(value: string) {
-		this.$el.text(value);
-	}
-
-	public set enabled(value: boolean) {
-		if (value) {
-			this.$el.removeClass('disabled');
-		} else {
-			this.$el.addClass('disabled');
-		}
-	}
-
-	public get enabled() {
-		return !this.$el.hasClass('disabled');
-	}
-
-	public dispose(): void {
-		if (this.$el) {
-			this.$el.dispose();
-			this.$el = null;
-		}
-
-		super.dispose();
-	}
-}
 
 export class EmptyView extends EventEmitter.EventEmitter implements GitView.IView {
 
@@ -148,7 +98,7 @@ export class EmptyView extends EventEmitter.EventEmitter implements GitView.IVie
 		var initSection = $('.section').appendTo(this.$el);
 		this.initButton = new Button(initSection);
 		this.initButton.label = nls.localize('gitinit', 'Initialize git repository');
-		this.initButton.on('click', (e) => {
+		this.initButton.addListener2('click', (e) => {
 			DOM.EventHelper.stop(e);
 
 			this.disableUI();
@@ -186,10 +136,6 @@ export class EmptyView extends EventEmitter.EventEmitter implements GitView.IVie
 		this.initButton.enabled = true;
 	}
 
-	private onError(e: Error): void {
-		this.messageService.show(Severity.Error, e);
-	}
-
 	public focus():void {
 		// no-op
 	}
@@ -201,11 +147,7 @@ export class EmptyView extends EventEmitter.EventEmitter implements GitView.IVie
 	public setVisible(visible:boolean): WinJS.TPromise<void> {
 		this.isVisible = visible;
 
-		return WinJS.Promise.as(null);
-	}
-
-	public getSelection():ISelection {
-		return Selection.EMPTY;
+		return WinJS.TPromise.as(null);
 	}
 
 	public getControl(): EventEmitter.IEventEmitter {
@@ -236,7 +178,7 @@ export class EmptyView extends EventEmitter.EventEmitter implements GitView.IVie
 			this.$el = null;
 		}
 
-		this.toDispose = Lifecycle.disposeAll(this.toDispose);
+		this.toDispose = Lifecycle.dispose(this.toDispose);
 
 		super.dispose();
 	}

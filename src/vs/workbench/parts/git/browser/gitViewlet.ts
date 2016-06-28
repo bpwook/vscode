@@ -21,9 +21,9 @@ import gitless = require('vs/workbench/parts/git/browser/views/gitless/gitlessVi
 import notroot = require('vs/workbench/parts/git/browser/views/notroot/notrootView');
 import noworkspace = require('vs/workbench/parts/git/browser/views/noworkspace/noworkspaceView');
 import { DisabledView } from './views/disabled/disabledView';
+import { HugeView } from './views/huge/hugeView';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IProgressService, IProgressRunner} from 'vs/platform/progress/common/progress';
-import {ISelection, Selection} from 'vs/platform/selection/common/selection';
 import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
 
 import IGitService = git.IGitService;
@@ -62,7 +62,8 @@ export class GitViewlet
 			this.instantiationService.createInstance(gitless.GitlessView),
 			new notroot.NotRootView(),
 			new noworkspace.NoWorkspaceView(),
-			new DisabledView()
+			new DisabledView(),
+			this.instantiationService.createInstance(HugeView)
 		];
 
 		views.forEach(v => {
@@ -70,14 +71,14 @@ export class GitViewlet
 			this.toDispose.push(v);
 		});
 
-		this.toUnbind.push(this.gitService.addBulkListener(() => this.onGitServiceChanges()));
+		this.toUnbind.push(this.gitService.addBulkListener2(() => this.onGitServiceChanges()));
 	}
 
 	// GitView.IController
 
 	public setView(id: string): winjs.Promise {
 		if (!this.$el) {
-			return winjs.Promise.as(null);
+			return winjs.TPromise.as(null);
 		}
 
 		var view = this.views[id];
@@ -87,10 +88,10 @@ export class GitViewlet
 		}
 
 		if (this.currentView === view) {
-			return winjs.Promise.as(null);
+			return winjs.TPromise.as(null);
 		}
 
-		var promise = winjs.Promise.as(null);
+		var promise = winjs.TPromise.as(null);
 
 		if (this.currentView) {
 			promise = this.currentView.setVisible(false);
@@ -118,7 +119,7 @@ export class GitViewlet
 
 		this.$el = parent.div().addClass('git-viewlet');
 
-		return winjs.Promise.as(null);
+		return winjs.TPromise.as(null);
 	}
 
 	public setVisible(visible:boolean): winjs.TPromise<void> {
@@ -133,7 +134,7 @@ export class GitViewlet
 				}
 			});
 		} else {
-			return (this.currentView ? this.currentView.setVisible(visible) : winjs.Promise.as(null)).then(() => {
+			return (this.currentView ? this.currentView.setVisible(visible) : winjs.TPromise.as(null)).then(() => {
 				super.setVisible(visible);
 			});
 		}
@@ -161,14 +162,6 @@ export class GitViewlet
 
 	public getSecondaryActions(): actions.IAction[] {
 		return this.currentView ? this.currentView.getSecondaryActions() : [];
-	}
-
-	public getSelection(): ISelection {
-		if (!this.currentView) {
-			return Selection.EMPTY;
-		}
-
-		return this.currentView.getSelection();
 	}
 
 	public getControl(): eventemitter.IEventEmitter {
@@ -201,6 +194,9 @@ export class GitViewlet
 		} else if (this.gitService.getState() === git.ServiceState.NotAtRepoRoot) {
 			this.setView('notroot');
 			this.progressRunner = null;
+		} else if (this.gitService.getState() === git.ServiceState.Huge) {
+			this.setView('huge');
+			this.progressRunner = null;
 		} else if (this.gitService.isIdle()) {
 			this.setView('changes');
 			this.progressRunner = null;
@@ -210,7 +206,7 @@ export class GitViewlet
 	}
 
 	public dispose(): void {
-		this.toDispose = lifecycle.disposeAll(this.toDispose);
+		this.toDispose = lifecycle.dispose(this.toDispose);
 		this.views = null;
 
 		super.dispose();

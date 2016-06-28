@@ -10,25 +10,23 @@ import nls = require('vs/nls');
 import {MIME_UNKNOWN} from 'vs/base/common/mime';
 import URI from 'vs/base/common/uri';
 import paths = require('vs/base/common/paths');
-import {DiffEditorInput} from 'vs/workbench/browser/parts/editor/diffEditorInput';
-import {EditorInput, EditorOptions} from 'vs/workbench/common/editor';
+import {DiffEditorInput} from 'vs/workbench/common/editor/diffEditorInput';
+import {EditorInput, EditorOptions, IEditorStacksModel} from 'vs/workbench/common/editor';
 import {BaseEditor} from 'vs/workbench/browser/parts/editor/baseEditor';
 import {BaseTextEditor} from 'vs/workbench/browser/parts/editor/textEditor';
-import {LocalFileChangeEvent, VIEWLET_ID, EventType as FileEventType, IWorkingFilesModel, ITextFileService} from 'vs/workbench/parts/files/common/files';
+import {LocalFileChangeEvent, TextFileChangeEvent, VIEWLET_ID, BINARY_FILE_EDITOR_ID, EventType as FileEventType, ITextFileService, AutoSaveMode, ModelState} from 'vs/workbench/parts/files/common/files';
 import {FileChangeType, FileChangesEvent, EventType as CommonFileEventType} from 'vs/platform/files/common/files';
 import {FileEditorInput} from 'vs/workbench/parts/files/browser/editors/fileEditorInput';
-import {DerivedFrameEditorInput} from 'vs/workbench/parts/files/browser/editors/derivedFrameEditorInput';
-import {State, TextFileEditorModel, CACHE} from 'vs/workbench/parts/files/browser/editors/textFileEditorModel';
-import {IFrameEditor} from 'vs/workbench/browser/parts/editor/iframeEditor';
-import {EventType as WorkbenchEventType, EditorInputEvent, UntitledEditorEvent} from 'vs/workbench/browser/events';
-import {IUntitledEditorService} from 'vs/workbench/services/untitled/browser/untitledEditorService';
+import {TextFileEditorModel, CACHE} from 'vs/workbench/parts/files/common/editors/textFileEditorModel';
+import {EventType as WorkbenchEventType, UntitledEditorEvent} from 'vs/workbench/common/events';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
+import {IUntitledEditorService} from 'vs/workbench/services/untitled/common/untitledEditorService';
 import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
-import {IQuickOpenService} from 'vs/workbench/services/quickopen/browser/quickOpenService';
 import {IActivityService, NumberBadge} from 'vs/workbench/services/activity/common/activityService';
-import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
-import {IEditorInput} from 'vs/platform/editor/common/editor';
 import {IEventService} from 'vs/platform/event/common/event';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
+import {IHistoryService} from 'vs/workbench/services/history/common/history';
 
 // This extension tracks files for changes to update editors and inputs accordingly.
 export class FileTracker implements IWorkbenchContribution {
@@ -38,22 +36,21 @@ export class FileTracker implements IWorkbenchContribution {
 	private static FILE_CHANGE_UPDATE_DELAY = 2000;
 
 	private lastDirtyCount: number;
-	private workingFiles: IWorkingFilesModel;
-
-	private toUnbind: { (): void; }[];
+	private stacks: IEditorStacksModel;
+	private toUnbind: IDisposable[];
 
 	constructor(
-		@IWorkspaceContextService private contextService: IWorkspaceContextService,
 		@IEventService private eventService: IEventService,
-		@IQuickOpenService private quickOpenService: IQuickOpenService,
 		@IWorkbenchEditorService private editorService: IWorkbenchEditorService,
 		@IActivityService private activityService: IActivityService,
 		@ITextFileService private textFileService: ITextFileService,
+		@IHistoryService private historyService: IHistoryService,
+		@IEditorGroupService private editorGroupService: IEditorGroupService,
 		@IInstantiationService private instantiationService: IInstantiationService,
 		@IUntitledEditorService private untitledEditorService: IUntitledEditorService
 	) {
 		this.toUnbind = [];
-		this.workingFiles = textFileService.getWorkingFilesModel();
+		this.stacks = editorGroupService.getStacksModel();
 
 		this.registerListeners();
 	}
@@ -65,72 +62,60 @@ export class FileTracker implements IWorkbenchContribution {
 	private registerListeners(): void {
 
 		// Update editors and inputs from local changes and saves
-		this.toUnbind.push(this.eventService.addListener(WorkbenchEventType.EDITOR_INPUT_CHANGED, (e: EditorInputEvent) => this.onEditorInputChanged(e)));
-		this.toUnbind.push(this.eventService.addListener(WorkbenchEventType.UNTITLED_FILE_DELETED, (e: UntitledEditorEvent) => this.onUntitledEditorDeleted(e)));
-		this.toUnbind.push(this.eventService.addListener(WorkbenchEventType.UNTITLED_FILE_DIRTY, (e: UntitledEditorEvent) => this.onUntitledEditorDirty(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_DIRTY, (e: LocalFileChangeEvent) => this.onTextFileDirty(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_SAVING, (e: LocalFileChangeEvent) => this.onTextFileSaving(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_SAVE_ERROR, (e: LocalFileChangeEvent) => this.onTextFileSaveError(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_SAVED, (e: LocalFileChangeEvent) => this.onTextFileSaved(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_REVERTED, (e: LocalFileChangeEvent) => this.onTextFileReverted(e)));
-		this.toUnbind.push(this.eventService.addListener('files.internal:fileChanged', (e: LocalFileChangeEvent) => this.onLocalFileChange(e)));
+		this.toUnbind.push(this.editorGroupService.onEditorsChanged(() => this.onEditorsChanged()));
+		this.toUnbind.push(this.eventService.addListener2(WorkbenchEventType.UNTITLED_FILE_SAVED, (e: UntitledEditorEvent) => this.onUntitledEditorSaved(e)));
+		this.toUnbind.push(this.eventService.addListener2(WorkbenchEventType.UNTITLED_FILE_DIRTY, (e: UntitledEditorEvent) => this.onUntitledEditorDirty(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_DIRTY, (e: TextFileChangeEvent) => this.onTextFileDirty(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_SAVE_ERROR, (e: TextFileChangeEvent) => this.onTextFileSaveError(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_SAVED, (e: TextFileChangeEvent) => this.onTextFileSaved(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_REVERTED, (e: TextFileChangeEvent) => this.onTextFileReverted(e)));
+		this.toUnbind.push(this.eventService.addListener2('files.internal:fileChanged', (e: LocalFileChangeEvent) => this.onLocalFileChange(e)));
 
 		// Update editors and inputs from disk changes
-		this.toUnbind.push(this.eventService.addListener(CommonFileEventType.FILE_CHANGES, (e: FileChangesEvent) => this.onFileChanges(e)));
+		this.toUnbind.push(this.eventService.addListener2(CommonFileEventType.FILE_CHANGES, (e: FileChangesEvent) => this.onFileChanges(e)));
 	}
 
-	private onEditorInputChanged(e: EditorInputEvent): void {
-		this.disposeTextFileModels();
+	private onEditorsChanged(): void {
+		this.disposeUnusedTextFileModels();
 	}
 
-	private onTextFileDirty(e: LocalFileChangeEvent): void {
-		this.emitInputStateChangeEvent(e.getAfter().resource);
-
-		if (!this.contextService.isAutoSaveEnabled()) {
-			this.updateActivityBadge(); // no indication needed when auto save is turned off and we didnt show dirty
+	private onTextFileDirty(e: TextFileChangeEvent): void {
+		if (this.textFileService.getAutoSaveMode() !== AutoSaveMode.AFTER_SHORT_DELAY) {
+			this.updateActivityBadge(); // no indication needed when auto save is enabled for short delay
 		}
+
+		// If a file becomes dirty but is not opened, we open it in the background
+		// Since it might be the intent of whoever created the model to show it shortly
+		// after, we delay this a little bit and check again if the editor has not been
+		// opened meanwhile
+		setTimeout(() => {
+			if (!this.stacks.isOpen(e.resource) && this.textFileService.isDirty(e.resource)) {
+				this.editorService.openEditor({ resource: e.resource, options: { inactive: true } }).done(null, errors.onUnexpectedError);
+			}
+		}, 500);
 	}
 
-	private onTextFileSaving(e: LocalFileChangeEvent): void {
-		this.emitInputStateChangeEvent(e.getAfter().resource);
-	}
-
-	private onTextFileSaveError(e: LocalFileChangeEvent): void {
-		this.emitInputStateChangeEvent(e.getAfter().resource);
+	private onTextFileSaveError(e: TextFileChangeEvent): void {
 		this.updateActivityBadge();
 	}
 
-	private onTextFileSaved(e: LocalFileChangeEvent): void {
-		this.emitInputStateChangeEvent(e.getAfter().resource);
-
+	private onTextFileSaved(e: TextFileChangeEvent): void {
 		if (this.lastDirtyCount > 0) {
 			this.updateActivityBadge();
 		}
 	}
 
-	private onTextFileReverted(e: LocalFileChangeEvent): void {
-		this.emitInputStateChangeEvent(e.getAfter().resource);
-
+	private onTextFileReverted(e: TextFileChangeEvent): void {
 		if (this.lastDirtyCount > 0) {
 			this.updateActivityBadge();
 		}
 	}
 
 	private onUntitledEditorDirty(e: UntitledEditorEvent): void {
-		let input = this.untitledEditorService.get(e.resource);
-		if (input) {
-			this.eventService.emit(WorkbenchEventType.EDITOR_INPUT_STATE_CHANGED, new EditorInputEvent(input));
-		}
-
 		this.updateActivityBadge();
 	}
 
-	private onUntitledEditorDeleted(e: UntitledEditorEvent): void {
-		let input = this.untitledEditorService.get(e.resource);
-		if (input) {
-			this.eventService.emit(WorkbenchEventType.EDITOR_INPUT_STATE_CHANGED, new EditorInputEvent(input));
-		}
-
+	private onUntitledEditorSaved(e: UntitledEditorEvent): void {
 		if (this.lastDirtyCount > 0) {
 			this.updateActivityBadge();
 		}
@@ -140,32 +125,10 @@ export class FileTracker implements IWorkbenchContribution {
 		let dirtyCount = this.textFileService.getDirty().length;
 		this.lastDirtyCount = dirtyCount;
 		if (dirtyCount > 0) {
-			this.activityService.showActivity(VIEWLET_ID, new NumberBadge(dirtyCount, (num) => nls.localize('dirtyFiles', "{0} unsaved files")), 'explorer-viewlet-label');
+			this.activityService.showActivity(VIEWLET_ID, new NumberBadge(dirtyCount, (num) => nls.localize('dirtyFiles', "{0} unsaved files", dirtyCount)), 'explorer-viewlet-label');
 		} else {
 			this.activityService.clearActivity(VIEWLET_ID);
 		}
-	}
-
-	private emitInputStateChangeEvent(resource: URI): void {
-
-		// Find all file editor inputs that are open from the given file resource and emit a editor input state change event.
-		// We could do all of this within the file editor input but having all the file change listeners in
-		// one place is more elegant and keeps the logic together at once place.
-		let editors = this.editorService.getVisibleEditors();
-		editors.forEach((editor) => {
-			let input = editor.input;
-			if (input instanceof DiffEditorInput) {
-				input = (<DiffEditorInput>input).getModifiedInput();
-			}
-
-			// File Editor Input
-			if (input instanceof FileEditorInput) {
-				let fileInput = <FileEditorInput>input;
-				if (fileInput.getResource().toString() === resource.toString()) {
-					this.eventService.emit(WorkbenchEventType.EDITOR_INPUT_STATE_CHANGED, new EditorInputEvent(fileInput));
-				}
-			}
-		});
 	}
 
 	// Note: there is some duplication with the other file event handler below. Since we cannot always rely on the disk events
@@ -182,10 +145,10 @@ export class FileTracker implements IWorkbenchContribution {
 			this.handleMovedFileInVisibleEditors(before ? before.resource : null, after ? after.resource : null, after ? after.mime : null);
 		}
 
-		// Dispose all known inputs pased on resource
+		// Dispose all known inputs passed on resource
 		let oldFile = e.getBefore();
 		if ((e.gotMoved() || e.gotDeleted())) {
-			this.disposeAll(oldFile.resource, this.quickOpenService.getEditorHistory());
+			this.handleDelete(oldFile.resource);
 		}
 	}
 
@@ -195,7 +158,7 @@ export class FileTracker implements IWorkbenchContribution {
 		let allDeleted = e.getDeleted();
 		if (allDeleted && allDeleted.length > 0) {
 			allDeleted.forEach((deleted) => {
-				this.disposeAll(deleted.resource, this.quickOpenService.getEditorHistory());
+				this.handleDelete(deleted.resource);
 			});
 		}
 
@@ -209,7 +172,7 @@ export class FileTracker implements IWorkbenchContribution {
 					return false;
 				}
 
-				if (new Date().getTime() - model.getLastDirtyTime() < FileTracker.FILE_CHANGE_UPDATE_DELAY) {
+				if (Date.now() - model.getLastDirtyTime() < FileTracker.FILE_CHANGE_UPDATE_DELAY) {
 					return false; // this is a weak check to see if the change came from outside the editor or not
 				}
 
@@ -241,11 +204,11 @@ export class FileTracker implements IWorkbenchContribution {
 						let state = textModel.getState();
 
 						// We only ever update models that are in good saved state
-						if (state === State.SAVED) {
+						if (state === ModelState.SAVED) {
 							let lastDirtyTime = textModel.getLastDirtyTime();
 
 							// Force a reopen of the input if this change came in later than our wait interval before we consider it
-							if (new Date().getTime() - lastDirtyTime > FileTracker.FILE_CHANGE_UPDATE_DELAY) {
+							if (Date.now() - lastDirtyTime > FileTracker.FILE_CHANGE_UPDATE_DELAY) {
 								let codeEditor = (<BaseTextEditor>editor).getControl();
 								let viewState = codeEditor.saveViewState();
 								let currentMtime = textModel.getLastModifiedTime(); // optimize for the case where the file did actually not change
@@ -259,21 +222,13 @@ export class FileTracker implements IWorkbenchContribution {
 					}
 
 					// Binary file: always update
-					else {
+					else if (editor.getId() === BINARY_FILE_EDITOR_ID) {
 						let editorOptions = new EditorOptions();
 						editorOptions.forceOpen = true;
 						editorOptions.preserveFocus = true;
 
 						this.editorService.openEditor(editor.input, editorOptions, editor.position).done(null, errors.onUnexpectedError);
 					}
-				}
-			}
-
-			// Derived Frame Editor Input
-			else if (input instanceof DerivedFrameEditorInput) {
-				let derivedInput = <DerivedFrameEditorInput>input;
-				if (e.contains(derivedInput.getResource(), FileChangeType.UPDATED)) {
-					(<IFrameEditor>editor).reload();
 				}
 			}
 		});
@@ -294,25 +249,25 @@ export class FileTracker implements IWorkbenchContribution {
 
 		// Support diff editor input too
 		if (input instanceof DiffEditorInput) {
-			input = (<DiffEditorInput>input).getModifiedInput();
+			input = (<DiffEditorInput>input).modifiedInput;
 		}
 
 		return input instanceof FileEditorInput && (<FileEditorInput>input).getResource().toString() === resource.toString();
 	}
 
 	private handleMovedFileInVisibleEditors(oldResource: URI, newResource: URI, mimeHint?: string): void {
+		let stacks = this.editorGroupService.getStacksModel();
 		let editors = this.editorService.getVisibleEditors();
-		editors.forEach((editor) => {
+		editors.forEach(editor => {
+			let group = stacks.groupAt(editor.position);
 			let input = editor.input;
 			if (input instanceof DiffEditorInput) {
-				input = (<DiffEditorInput>input).getModifiedInput();
+				input = (<DiffEditorInput>input).modifiedInput;
 			}
 
 			let inputResource: URI;
 			if (input instanceof FileEditorInput) {
 				inputResource = (<FileEditorInput>input).getResource();
-			} else if (input instanceof DerivedFrameEditorInput) {
-				inputResource = (<DerivedFrameEditorInput>input).getResource();
 			}
 
 			// Editor Input with associated Resource
@@ -338,20 +293,12 @@ export class FileTracker implements IWorkbenchContribution {
 
 					let editorOptions = new EditorOptions();
 					editorOptions.preserveFocus = true;
+					editorOptions.pinned = group.isPinned(input);
+					editorOptions.index = group.indexOf(input);
 
 					// Reopen File Input
 					if (input instanceof FileEditorInput) {
 						editorInput = this.instantiationService.createInstance(FileEditorInput, reopenFileResource, mimeHint || MIME_UNKNOWN, void 0);
-					}
-
-					// Reopen Derived Input
-					else if (input instanceof DerivedFrameEditorInput) {
-						let derivedFrameInput = <DerivedFrameEditorInput>input;
-
-						editorInput = derivedFrameInput.createNew(reopenFileResource);
-					}
-
-					if (editorInput) {
 						this.editorService.openEditor(editorInput, editorOptions, editor.position).done(null, errors.onUnexpectedError);
 					}
 				}
@@ -364,22 +311,21 @@ export class FileTracker implements IWorkbenchContribution {
 	private getMatchingFileEditorInputFromDiff(input: DiffEditorInput, arg: any): FileEditorInput {
 
 		// First try modifiedInput
-		let modifiedInput = input.getModifiedInput();
+		let modifiedInput = input.modifiedInput;
 		let res = this.getMatchingFileEditorInputFromInput(modifiedInput, arg);
 		if (res) {
 			return res;
 		}
 
 		// Second try originalInput
-		let originalInput = input.getOriginalInput();
-		return this.getMatchingFileEditorInputFromInput(originalInput, arg);
+		return this.getMatchingFileEditorInputFromInput(input.originalInput, arg);
 	}
 
 	private getMatchingFileEditorInputFromInput(input: EditorInput, deletedResource: URI): FileEditorInput;
 	private getMatchingFileEditorInputFromInput(input: EditorInput, updatedFiles: FileChangesEvent): FileEditorInput;
 	private getMatchingFileEditorInputFromInput(input: EditorInput, arg: any): FileEditorInput {
 		if (input instanceof FileEditorInput) {
-			if (URI.isURI(arg)) {
+			if (arg instanceof URI) {
 				let deletedResource = <URI>arg;
 				if (this.containsResource(input, deletedResource)) {
 					return input;
@@ -395,72 +341,51 @@ export class FileTracker implements IWorkbenchContribution {
 		return null;
 	}
 
-	private disposeAll(deletedResource: URI, history: IEditorInput[]): void {
-		if (this.textFileService.isDirty(deletedResource)) {
+	private handleDelete(resource: URI): void {
+		if (this.textFileService.isDirty(resource)) {
 			return; // never dispose dirty resources
 		}
 
 		// Add existing clients matching resource
-		let inputsContainingPath: EditorInput[] = FileEditorInput.getAll(deletedResource);
+		let inputsContainingPath: EditorInput[] = FileEditorInput.getAll(resource);
 
-		// Add those from history as well
-		for (let i = 0; i < history.length; i++) {
-			let element = history[i];
-
-			// File Input
-			if (element instanceof FileEditorInput && this.containsResource(<FileEditorInput>element, deletedResource)) {
-				inputsContainingPath.push(<FileEditorInput>element);
-			}
-
-			// Derived Frame Input
-			else if (element instanceof DerivedFrameEditorInput && this.containsResource(<DerivedFrameEditorInput>element, deletedResource)) {
-				inputsContainingPath.push(<DerivedFrameEditorInput>element);
-			}
-		}
-
-		// Add those from visible editors too
-		let editors = this.editorService.getVisibleEditors();
-		editors.forEach((editor) => {
-			let input = editor.input;
+		// Collect from history and opened editors and see which ones to pick
+		const candidates = this.historyService.getHistory();
+		this.stacks.groups.forEach(group => candidates.push(...group.getEditors()));
+		candidates.forEach(input => {
 			if (input instanceof DiffEditorInput) {
-				input = this.getMatchingFileEditorInputFromDiff(<DiffEditorInput>input, deletedResource);
+				input = this.getMatchingFileEditorInputFromDiff(<DiffEditorInput>input, resource);
 				if (input instanceof FileEditorInput) {
 					inputsContainingPath.push(<FileEditorInput>input);
 				}
 			}
 
 			// File Editor Input
-			else if (input instanceof FileEditorInput && this.containsResource(<FileEditorInput>input, deletedResource)) {
+			else if (input instanceof FileEditorInput && this.containsResource(<FileEditorInput>input, resource)) {
 				inputsContainingPath.push(<FileEditorInput>input);
 			}
-
-			// Derived Frame Input
-			else if (input instanceof DerivedFrameEditorInput && this.containsResource(<DerivedFrameEditorInput>input, deletedResource)) {
-				inputsContainingPath.push(<DerivedFrameEditorInput>input);
-			}
 		});
 
-		// Dispose all
 		inputsContainingPath.forEach((input) => {
+
+			// Editor History
+			this.historyService.remove(input);
+
+			// Dispose Input
 			if (!input.isDisposed()) {
-				if (input instanceof FileEditorInput) {
-					let fileInputToDispose = <FileEditorInput>input;
-					fileInputToDispose.dispose(true /* force */);
-				} else {
-					input.dispose();
-				}
+				input.dispose();
 			}
 		});
+
+		// Clean up model if any
+		CACHE.dispose(resource);
 	}
 
 	private containsResource(input: FileEditorInput, resource: URI): boolean;
-	private containsResource(input: DerivedFrameEditorInput, resource: URI): boolean;
 	private containsResource(input: EditorInput, resource: URI): boolean {
 		let fileResource: URI;
 		if (input instanceof FileEditorInput) {
 			fileResource = (<FileEditorInput>input).getResource();
-		} else {
-			fileResource = (<DerivedFrameEditorInput>input).getResource();
 		}
 
 		if (paths.isEqualOrParent(fileResource.fsPath, resource.fsPath)) {
@@ -470,19 +395,19 @@ export class FileTracker implements IWorkbenchContribution {
 		return false;
 	}
 
-	private disposeTextFileModels(): void {
+	private disposeUnusedTextFileModels(): void {
 
 		// To not grow our text file model cache infinitly, we dispose models that
-		// are not showing up in any editor and are not in the working file set or dirty.
+		// are not showing up in any opened editor.
 
 		// Get all cached file models
 		CACHE.getAll()
 
-		// Only take text file models and remove those that are under working files or opened
-			.filter((model) => !this.workingFiles.hasEntry(model.getResource()) && this.canDispose(model))
+			// Only take text file models and remove those that are under working files or opened
+			.filter(model => !this.stacks.isOpen(model.getResource()) && this.canDispose(model))
 
-		// Dispose
-			.forEach((model) => CACHE.dispose(model.getResource()));
+			// Dispose
+			.forEach(model => CACHE.dispose(model.getResource()));
 	}
 
 	private canDispose(textModel: TextFileEditorModel): boolean {
@@ -490,32 +415,22 @@ export class FileTracker implements IWorkbenchContribution {
 			return false; // we need data!
 		}
 
+		if (textModel.isDisposed()) {
+			return false; // already disposed
+		}
+
 		if (textModel.textEditorModel && textModel.textEditorModel.isAttachedToEditor()) {
 			return false; // never dispose when attached to editor
 		}
 
-		if (textModel.getState() !== State.SAVED) {
+		if (textModel.getState() !== ModelState.SAVED) {
 			return false; // never dispose unsaved models
-		}
-
-		if (this.editorService.getVisibleEditors().some(e => {
-			if (e.input instanceof DerivedFrameEditorInput) {
-				let derivedInputResource = (<DerivedFrameEditorInput>e.input).getResource();
-
-				return derivedInputResource && derivedInputResource.toString() === textModel.getResource().toString();
-			}
-
-			return false;
-		})) {
-			return false; // never dispose models that are used in derived frame inputs
 		}
 
 		return true;
 	}
 
 	public dispose(): void {
-		while (this.toUnbind.length) {
-			this.toUnbind.pop()();
-		}
+		dispose(this.toUnbind);
 	}
 }

@@ -4,9 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import Platform = require('vs/base/common/platform');
-import Browser = require('vs/base/browser/browser');
-import IframeUtils = require('vs/base/browser/iframe');
+import * as platform from 'vs/base/common/platform';
+import * as browser from 'vs/base/browser/browser';
+import {IframeUtils} from 'vs/base/browser/iframe';
 
 export interface IMouseEvent {
 	browserEvent:MouseEvent;
@@ -21,6 +21,7 @@ export interface IMouseEvent {
 	shiftKey:boolean;
 	altKey:boolean;
 	metaKey:boolean;
+	timestamp:number;
 
 	preventDefault(): void;
 	stopPropagation(): void;
@@ -50,50 +51,28 @@ export class StandardMouseEvent implements IMouseEvent {
 		this.middleButton = e.button === 1;
 		this.rightButton = e.button === 2;
 
-		this.target = e.target || (<any>e).targetNode || e.srcElement;
+		this.target = <HTMLElement>e.target;
 
 		this.detail = e.detail || 1;
 		if (e.type === 'dblclick') {
 			this.detail = 2;
 		}
-		this.posx = 0;
-		this.posy = 0;
 		this.ctrlKey = e.ctrlKey;
 		this.shiftKey = e.shiftKey;
 		this.altKey = e.altKey;
 		this.metaKey = e.metaKey;
 
-		var readClientCoords = () => {
-			if (e.clientX || e.clientY) {
-				this.posx = e.clientX + document.body.scrollLeft + document.documentElement.scrollLeft;
-				this.posy = e.clientY + document.body.scrollTop + document.documentElement.scrollTop;
-				return true;
-			}
-			return false;
-		};
-
-		var readPageCoords = () => {
-			if (e.pageX || e.pageY) {
-				this.posx = e.pageX;
-				this.posy = e.pageY;
-				return true;
-			}
-			return false;
-		};
-
-		var test1 = readPageCoords, test2 = readClientCoords;
-		if (Browser.isIE10) {
-			// The if A elseif B logic here is inversed in IE10 due to an IE10 issue
-			test1 = readClientCoords;
-			test2 = readPageCoords;
-		}
-
-		if (!test1()) {
-			test2();
+		if (typeof e.pageX === 'number') {
+			this.posx = e.pageX;
+			this.posy = e.pageY;
+		} else {
+			// Probably hit by MSGestureEvent
+			this.posx = e.clientX + document.body.scrollLeft + document.documentElement.scrollLeft;
+			this.posy = e.clientY + document.body.scrollTop + document.documentElement.scrollTop;
 		}
 
 		// Find the position of the iframe this code is executing in relative to the iframe where the event was captured.
-		var iframeOffsets = IframeUtils.getPositionOfChildWindowRelativeToAncestorWindow(self, e.view);
+		let iframeOffsets = IframeUtils.getPositionOfChildWindowRelativeToAncestorWindow(self, e.view);
 		this.posx -= iframeOffsets.left;
 		this.posy -= iframeOffsets.top;
 	}
@@ -171,8 +150,8 @@ export class StandardMouseWheelEvent {
 		this.deltaX = deltaX;
 
 		if (e) {
-			var e1 = <IWebKitMouseWheelEvent><any>e;
-			var e2 = <IGeckoMouseWheelEvent><any>e;
+			let e1 = <IWebKitMouseWheelEvent><any>e;
+			let e2 = <IGeckoMouseWheelEvent><any>e;
 
 			// vertical delta scroll
 			if (typeof e1.wheelDeltaY !== 'undefined') {
@@ -183,7 +162,7 @@ export class StandardMouseWheelEvent {
 
 			// horizontal delta scroll
 			if (typeof e1.wheelDeltaX !== 'undefined') {
-				if (Browser.isSafari && Platform.isWindows) {
+				if (browser.isSafari && platform.isWindows) {
 					this.deltaX = - (e1.wheelDeltaX / 120);
 				} else {
 					this.deltaX = e1.wheelDeltaX / 120;

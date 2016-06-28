@@ -5,9 +5,41 @@
 
 'use strict';
 
-import {IDeclarationSupport} from 'vs/editor/common/modes';
-import LanguageFeatureRegistry from 'vs/editor/common/modes/languageFeatureRegistry';
+import {onUnexpectedError} from 'vs/base/common/errors';
+import {TPromise} from 'vs/base/common/winjs.base';
+import {IReadOnlyModel} from 'vs/editor/common/editorCommon';
+import {CommonEditorRegistry} from 'vs/editor/common/editorCommonExtensions';
+import {DefinitionProviderRegistry} from 'vs/editor/common/modes';
+import {Location} from 'vs/editor/common/modes';
+import {asWinJsPromise} from 'vs/base/common/async';
+import {Position} from 'vs/editor/common/core/position';
 
-const FeatureRegistry = new LanguageFeatureRegistry<IDeclarationSupport>('declarationSupport');
+export function getDeclarationsAtPosition(model: IReadOnlyModel, position: Position): TPromise<Location[]> {
 
-export default FeatureRegistry;
+	const provider = DefinitionProviderRegistry.ordered(model);
+
+	// get results
+	const promises = provider.map((provider, idx) => {
+		return asWinJsPromise((token) => {
+			return provider.provideDefinition(model, position, token);
+		}).then(result => {
+			return result;
+		}, err => {
+			onUnexpectedError(err);
+		});
+	});
+
+	return TPromise.join(promises).then(allReferences => {
+		let result: Location[] = [];
+		for (let references of allReferences) {
+			if (Array.isArray(references)) {
+				result.push(...references);
+			} else if (references) {
+				result.push(references);
+			}
+		}
+		return result;
+	});
+}
+
+CommonEditorRegistry.registerDefaultLanguageCommand('_executeDefinitionProvider', getDeclarationsAtPosition);

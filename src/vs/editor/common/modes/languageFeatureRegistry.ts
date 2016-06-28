@@ -6,46 +6,43 @@
 'use strict';
 
 import Event, {Emitter} from 'vs/base/common/event';
-import {TPromise} from 'vs/base/common/winjs.base';
 import {IDisposable} from 'vs/base/common/lifecycle';
-import URI from 'vs/base/common/uri';
-import {binarySearch} from 'vs/base/common/arrays';
-import {IPosition, IModel} from 'vs/editor/common/editorCommon';
-import {IDeclarationSupport, ILineContext, IReference} from 'vs/editor/common/modes';
-import {LanguageSelector, ModelLike, score} from 'vs/editor/common/modes/languageSelector';
+import {IReadOnlyModel} from 'vs/editor/common/editorCommon';
+import {LanguageSelector, score} from 'vs/editor/common/modes/languageSelector';
 
 interface Entry<T> {
 	selector: LanguageSelector;
 	provider: T;
+	isBuiltin: boolean;
 	_score: number;
 	_time: number;
 }
 
 export default class LanguageFeatureRegistry<T> {
 
+	private _clock: number = 0;
 	private _entries: Entry<T>[] = [];
-	private _onDidChange = new Emitter<number>();
-	private _supportName: string;
+	private _onDidChange: Emitter<number> = new Emitter<number>();
 
-	constructor(supportName?: string) {
-		this._supportName = supportName;
+	constructor() {
 	}
 
-	get onDidChange():Event<number> {
+	get onDidChange(): Event<number> {
 		return this._onDidChange.event;
 	}
 
-	register(selector: LanguageSelector, provider: T): IDisposable {
+	register(selector: LanguageSelector, provider: T, isBuiltin = false): IDisposable {
 
 		let entry: Entry<T> = {
 			selector,
 			provider,
+			isBuiltin,
 			_score: -1,
-			_time: Date.now()
+			_time: this._clock++
 		};
 
 		this._entries.push(entry);
-		this._candidate = undefined;
+		this._lastCandidate = undefined;
 		this._onDidChange.fire(this._entries.length);
 
 		return {
@@ -54,51 +51,49 @@ export default class LanguageFeatureRegistry<T> {
 					let idx = this._entries.indexOf(entry);
 					if (idx >= 0) {
 						this._entries.splice(idx, 1);
-						this._candidate = undefined;
+						this._lastCandidate = undefined;
 						this._onDidChange.fire(this._entries.length);
 						entry = undefined;
 					}
 				}
 			}
-		}
+		};
 	}
 
-	has(model: IModel): boolean {
+	has(model: IReadOnlyModel): boolean {
 		return this.all(model).length > 0;
 	}
 
-	all(model: IModel | ModelLike): T[]{
-		let result: T[] = [];
-		if (model) {
-			this._updateScores(model);
-			// from registry
-			for (let entry of this._entries) {
-				if (entry._score > 0) {
-					result.push(entry.provider);
-				}
-			}
-			// from mode
-			if (isModel(model)) {
-				if (model.getMode() && model.getMode()[this._supportName]) {
-					result.push(model.getMode()[this._supportName]);
-				}
+	all(model: IReadOnlyModel): T[] {
+		if (!model || model.isTooLargeForHavingAMode()) {
+			return [];
+		}
+
+		this._updateScores(model);
+		const result: T[] = [];
+
+		// from registry
+		for (let entry of this._entries) {
+			if (entry._score > 0) {
+				result.push(entry.provider);
 			}
 		}
+
 		return result;
 	}
 
-	ordered(model: IModel|ModelLike): T[] {
-		let entries = this._orderedEntries(model);
-		return entries.map(item => item.provider);
+	ordered(model: IReadOnlyModel): T[] {
+		const result: T[] = [];
+		this._orderedForEach(model, entry => result.push(entry.provider));
+		return result;
 	}
 
-	orderedGroups(model: IModel | ModelLike): T[][] {
-		let entries = this._orderedEntries(model);
-		let result: T[][] = [];
+	orderedGroups(model: IReadOnlyModel): T[][] {
+		const result: T[][] = [];
 		let lastBucket: T[];
 		let lastBucketScore: number;
 
-		for (let entry of entries) {
+		this._orderedForEach(model, entry => {
 			if (lastBucket && lastBucketScore === entry._score) {
 				lastBucket.push(entry.provider);
 			} else {
@@ -106,75 +101,55 @@ export default class LanguageFeatureRegistry<T> {
 				lastBucket = [entry.provider];
 				result.push(lastBucket);
 			}
-		}
+		});
 
 		return result;
 	}
 
-	private _orderedEntries(model: IModel | ModelLike): Entry<T>[] {
-		let result: Entry<T>[] = [];
-		if (model) {
-			if (this._updateScores(model)) {
-				this._sortByScore();
-			}
+	private _orderedForEach(model: IReadOnlyModel, callback: (provider: Entry<T>) => any): void {
 
-			// from registry
-			for (let entry of this._entries) {
-				if (entry._score > 0) {
-					result.push(entry);
-				}
-			}
+		if (!model || model.isTooLargeForHavingAMode()) {
+			return;
+		}
 
-			// from mode
-			if (isModel(model)) {
-				if (model.getMode() && model.getMode()[this._supportName]) {
+		this._updateScores(model);
 
-					let entry: Entry<T> = {
-						selector: undefined,
-						provider: model.getMode()[this._supportName],
-						_score: .5,
-						_time: 0
-					};
-
-					let idx = binarySearch(result, entry, LanguageFeatureRegistry._compareByScoreAndTime);
-					result.splice(idx < 0 ? ~idx : idx, 0, entry);
-				}
+		for (let from = 0; from < this._entries.length; from++) {
+			let entry = this._entries[from];
+			if (entry._score > 0) {
+				callback(entry);
 			}
 		}
-		return result;
 	}
 
-	private _candidate: ModelLike;
+	private _lastCandidate: { uri: string; language: string; };
 
-	private _updateScores(model: IModel|ModelLike): boolean {
+	private _updateScores(model: IReadOnlyModel): boolean {
 
-		let candidate: ModelLike;
-		if (isModel(model)) {
-			candidate = {
-				uri: model.getAssociatedResource(),
-				language: model.getModeId()
-			};
-		} else {
-			candidate = model;
-		}
+		let candidate = {
+			uri: model.uri.toString(),
+			language: model.getModeId()
+		};
 
-		if (this._candidate
-			&& this._candidate.language === candidate.language
-			&& this._candidate.uri.toString() === candidate.uri.toString()) {
+		if (this._lastCandidate
+			&& this._lastCandidate.language === candidate.language
+			&& this._lastCandidate.uri === candidate.uri) {
 
 			// nothing has changed
 			return;
 		}
 
-		this._candidate = candidate;
+		this._lastCandidate = candidate;
 
 		for (let entry of this._entries) {
-			entry._score = score(entry.selector, this._candidate);
+			entry._score = score(entry.selector, model.uri, model.getModeId());
+			if (entry.isBuiltin && entry._score > 0) {
+				entry._score = .5;
+				entry._time = -1;
+			}
 		}
-		return true;
-	}
 
-	private _sortByScore(): void {
+		// needs sorting
 		this._entries.sort(LanguageFeatureRegistry._compareByScoreAndTime);
 	}
 
@@ -183,7 +158,7 @@ export default class LanguageFeatureRegistry<T> {
 			return 1;
 		} else if (a._score > b._score) {
 			return -1;
-		} else if(a._time < b._time){
+		} else if (a._time < b._time) {
 			return 1;
 		} else if (a._time > b._time) {
 			return -1;
@@ -191,8 +166,4 @@ export default class LanguageFeatureRegistry<T> {
 			return 0;
 		}
 	}
-}
-
-function isModel(thing: any): thing is IModel {
-	return typeof thing['getMode'] === 'function';
 }

@@ -11,62 +11,27 @@ import gracefulFs = require('graceful-fs');
 gracefulFs.gracefulify(fs);
 
 import {PPromise} from 'vs/base/common/winjs.base';
-import glob = require('vs/base/common/glob');
-import {IProgress, ILineMatch, IPatternInfo} from 'vs/platform/search/common/search';
+import {MAX_FILE_SIZE} from 'vs/platform/files/common/files';
 import {FileWalker, Engine as FileSearchEngine} from 'vs/workbench/services/search/node/fileSearch';
 import {Engine as TextSearchEngine} from 'vs/workbench/services/search/node/textSearch';
-
-export interface IRawSearch {
-	rootPaths: string[];
-	filePatterns: IPatternInfo[];
-	excludePattern?: glob.IExpression;
-	includePattern?: glob.IExpression;
-	contentPattern?: IPatternInfo;
-	maxResults?: number;
-	fileEncoding?: string;
-}
-
-export interface IRawSearchService {
-	fileSearch(search: IRawSearch): PPromise<ISerializedSearchComplete, ISerializedSearchProgressItem>;
-	textSearch(search: IRawSearch): PPromise<ISerializedSearchComplete, ISerializedSearchProgressItem>;
-}
-
-export interface ISearchEngine {
-	search: (onResult: (match: ISerializedFileMatch) => void, onProgress: (progress: IProgress) => void, done: (error: Error, isLimitHit: boolean) => void) => void;
-	cancel: () => void;
-}
-
-export interface ISerializedSearchComplete {
-	limitHit: boolean;
-}
-
-export interface ISerializedFileMatch {
-	path?: string;
-	lineMatches?: ILineMatch[];
-}
-
-export interface ISerializedSearchProgressItem extends ISerializedFileMatch, IProgress {
-	// Marker interface to indicate the possible values for progress calls from the engine
-}
+import {IRawSearchService, IRawSearch, ISerializedSearchProgressItem, ISerializedSearchComplete, ISearchEngine} from './search';
 
 export class SearchService implements IRawSearchService {
 
 	public fileSearch(config: IRawSearch): PPromise<ISerializedSearchComplete, ISerializedSearchProgressItem> {
-		config.filePatterns = config.filePatterns && config.filePatterns.length > 0 ? config.filePatterns : [{ pattern: '' /* All files */ }];
-
 		let engine = new FileSearchEngine(config);
 
 		return this.doSearch(engine);
 	}
 
 	public textSearch(config: IRawSearch): PPromise<ISerializedSearchComplete, ISerializedSearchProgressItem> {
-		config.filePatterns = config.filePatterns && config.filePatterns.length > 0 ? config.filePatterns : [{ pattern: '' /* All files */ }];
-
 		let engine = new TextSearchEngine(config, new FileWalker({
-			rootPaths: config.rootPaths,
+			rootFolders: config.rootFolders,
+			extraFiles: config.extraFiles,
 			includePattern: config.includePattern,
 			excludePattern: config.excludePattern,
-			filePatterns: config.filePatterns
+			filePattern: config.filePattern,
+			maxFilesize: MAX_FILE_SIZE
 		}));
 
 		return this.doSearch(engine);

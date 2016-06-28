@@ -6,27 +6,31 @@
 'use strict';
 
 import 'vs/css!./links';
-import nls = require('vs/nls');
-import {TPromise} from 'vs/base/common/winjs.base';
-import Platform = require('vs/base/common/platform');
-import Errors = require('vs/base/common/errors');
-import Network = require('vs/base/common/network');
-import Keyboard = require('vs/base/browser/keyboardEvent');
-import {CommonEditorRegistry, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
-import {EditorAction, Behaviour} from 'vs/editor/common/editorAction';
-import EventEmitter = require('vs/base/common/eventEmitter');
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
-import {IEditorService, IResourceInput} from 'vs/platform/editor/common/editor';
-import {IRequestService} from 'vs/platform/request/common/request';
-import {IMessageService} from 'vs/platform/message/common/message';
-import Severity from 'vs/base/common/severity';
+import * as nls from 'vs/nls';
+import {onUnexpectedError} from 'vs/base/common/errors';
 import {KeyCode} from 'vs/base/common/keyCodes';
+import * as platform from 'vs/base/common/platform';
+import Severity from 'vs/base/common/severity';
+import URI from 'vs/base/common/uri';
+import {TPromise} from 'vs/base/common/winjs.base';
+import {IKeyboardEvent} from 'vs/base/browser/keyboardEvent';
+import {IEditorService, IResourceInput} from 'vs/platform/editor/common/editor';
+import {IMessageService} from 'vs/platform/message/common/message';
+import {Range} from 'vs/editor/common/core/range';
+import {EditorAction} from 'vs/editor/common/editorAction';
+import {Behaviour} from 'vs/editor/common/editorActionEnablement';
+import * as editorCommon from 'vs/editor/common/editorCommon';
+import {CommonEditorRegistry, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
+import {ILink, LinkProviderRegistry} from 'vs/editor/common/modes';
+import {IEditorWorkerService} from 'vs/editor/common/services/editorWorkerService';
+import {IEditorMouseEvent, ICodeEditor} from 'vs/editor/browser/editorBrowser';
+import {getLinks} from 'vs/editor/contrib/links/common/links';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
+import {EditorBrowserRegistry} from 'vs/editor/browser/editorBrowserExtensions';
 
 class LinkOccurence {
 
-	public static decoration(link:Modes.ILink): EditorCommon.IModelDeltaDecoration {
+	public static decoration(link:ILink): editorCommon.IModelDeltaDecoration {
 		return {
 			range: {
 				startLineNumber: link.range.startLineNumber,
@@ -35,14 +39,11 @@ class LinkOccurence {
 				endColumn: link.range.endColumn
 			},
 			options: LinkOccurence._getOptions(link, false)
-		}
+		};
 	}
 
-	private static _getOptions(link:Modes.ILink, isActive:boolean):EditorCommon.IModelDecorationOptions {
+	private static _getOptions(link:ILink, isActive:boolean):editorCommon.IModelDecorationOptions {
 		var result = '';
-		if (link.extraInlineClassName) {
-			result = link.extraInlineClassName + ' ';
-		}
 
 		if (isActive) {
 			result += LinkDetector.CLASS_NAME_ACTIVE;
@@ -51,69 +52,91 @@ class LinkOccurence {
 		}
 
 		return {
-			stickiness: EditorCommon.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+			stickiness: editorCommon.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
 			inlineClassName: result,
 			hoverMessage: LinkDetector.HOVER_MESSAGE_GENERAL
 		};
 	}
 
 	public decorationId:string;
-	public link:Modes.ILink;
+	public link:ILink;
 
-	constructor(link:Modes.ILink, decorationId:string/*, changeAccessor:EditorCommon.IModelDecorationsChangeAccessor*/) {
+	constructor(link:ILink, decorationId:string/*, changeAccessor:editorCommon.IModelDecorationsChangeAccessor*/) {
 		this.link = link;
 		this.decorationId = decorationId;
 	}
 
-	public activate(changeAccessor: EditorCommon.IModelDecorationsChangeAccessor):void {
+	public activate(changeAccessor: editorCommon.IModelDecorationsChangeAccessor):void {
 		changeAccessor.changeDecorationOptions(this.decorationId, LinkOccurence._getOptions(this.link, true));
 	}
 
-	public deactivate(changeAccessor: EditorCommon.IModelDecorationsChangeAccessor):void {
+	public deactivate(changeAccessor: editorCommon.IModelDecorationsChangeAccessor):void {
 		changeAccessor.changeDecorationOptions(this.decorationId, LinkOccurence._getOptions(this.link, false));
 	}
 }
 
-class LinkDetector {
+class Link {
+	range: Range;
+	url: string;
+
+	constructor(source:ILink) {
+		this.range = new Range(source.range.startLineNumber, source.range.startColumn, source.range.endLineNumber, source.range.endColumn);
+		this.url = source.url;
+	}
+}
+
+class LinkDetector implements editorCommon.IEditorContribution {
+
+	public static ID: string = 'editor.linkDetector';
+	public static get(editor:editorCommon.ICommonCodeEditor): LinkDetector {
+		return <LinkDetector>editor.getContribution(LinkDetector.ID);
+	}
+
 	static RECOMPUTE_TIME = 1000; // ms
-	static TRIGGER_KEY_VALUE = Platform.isMacintosh ? KeyCode.Meta : KeyCode.Ctrl;
-	static TRIGGER_MODIFIER = Platform.isMacintosh ? 'metaKey' : 'ctrlKey';
-	static HOVER_MESSAGE_GENERAL = Platform.isMacintosh ? nls.localize('links.navigate.mac', "Cmd + click to follow link") : nls.localize('links.navigate', "Ctrl + click to follow link");
+	static TRIGGER_KEY_VALUE = platform.isMacintosh ? KeyCode.Meta : KeyCode.Ctrl;
+	static TRIGGER_MODIFIER = platform.isMacintosh ? 'metaKey' : 'ctrlKey';
+	static HOVER_MESSAGE_GENERAL = platform.isMacintosh ? nls.localize('links.navigate.mac', "Cmd + click to follow link") : nls.localize('links.navigate', "Ctrl + click to follow link");
 	static CLASS_NAME = 'detected-link';
 	static CLASS_NAME_ACTIVE = 'detected-link-active';
 
-	private editor:EditorCommon.ICommonCodeEditor;
-	private listenersToRemove:EventEmitter.ListenerUnbind[];
+	private editor:ICodeEditor;
+	private listenersToRemove:IDisposable[];
 	private timeoutPromise:TPromise<void>;
-	private computePromise:TPromise<Modes.ILink[]>;
+	private computePromise:TPromise<ILink[]>;
 	private activeLinkDecorationId:string;
-	private lastMouseEvent:EditorBrowser.IMouseEvent;
+	private lastMouseEvent:IEditorMouseEvent;
 	private editorService:IEditorService;
 	private messageService:IMessageService;
+	private editorWorkerService: IEditorWorkerService;
 	private currentOccurences:{ [decorationId:string]:LinkOccurence; };
 
-	constructor(editor:EditorCommon.ICommonCodeEditor, editorService:IEditorService, messageService:IMessageService) {
+	constructor(
+		editor:ICodeEditor,
+		@IEditorService editorService:IEditorService,
+		@IMessageService messageService:IMessageService,
+		@IEditorWorkerService editorWorkerService: IEditorWorkerService
+	) {
 		this.editor = editor;
 		this.editorService = editorService;
 		this.messageService = messageService;
+		this.editorWorkerService = editorWorkerService;
 		this.listenersToRemove = [];
-		this.listenersToRemove.push(editor.addListener('change', (e:EditorCommon.IModelContentChangedEvent) => this.onChange()));
-		this.listenersToRemove.push(editor.addListener(EditorCommon.EventType.ModelChanged, (e:EditorCommon.IModelContentChangedEvent) => this.onModelChanged()));
-		this.listenersToRemove.push(editor.addListener(EditorCommon.EventType.ModelModeChanged, (e:EditorCommon.IModelModeChangedEvent) => this.onModelModeChanged()));
-		this.listenersToRemove.push(editor.addListener(EditorCommon.EventType.ModelModeSupportChanged, (e: EditorCommon.IModeSupportChangedEvent) => {
-			if (e.linkSupport) {
-				this.onModelModeChanged();
-			}
-		}));
-		this.listenersToRemove.push(this.editor.addListener(EditorCommon.EventType.MouseUp, (e:EditorBrowser.IMouseEvent) => this.onEditorMouseUp(e)));
-		this.listenersToRemove.push(this.editor.addListener(EditorCommon.EventType.MouseMove, (e:EditorBrowser.IMouseEvent) => this.onEditorMouseMove(e)));
-		this.listenersToRemove.push(this.editor.addListener(EditorCommon.EventType.KeyDown, (e:Keyboard.StandardKeyboardEvent) => this.onEditorKeyDown(e)));
-		this.listenersToRemove.push(this.editor.addListener(EditorCommon.EventType.KeyUp, (e:Keyboard.StandardKeyboardEvent) => this.onEditorKeyUp(e)));
+		this.listenersToRemove.push(editor.onDidChangeModelContent((e) => this.onChange()));
+		this.listenersToRemove.push(editor.onDidChangeModel((e) => this.onModelChanged()));
+		this.listenersToRemove.push(editor.onDidChangeModelMode((e) => this.onModelModeChanged()));
+		this.listenersToRemove.push(this.editor.onMouseUp((e:IEditorMouseEvent) => this.onEditorMouseUp(e)));
+		this.listenersToRemove.push(this.editor.onMouseMove((e:IEditorMouseEvent) => this.onEditorMouseMove(e)));
+		this.listenersToRemove.push(this.editor.onKeyDown((e:IKeyboardEvent) => this.onEditorKeyDown(e)));
+		this.listenersToRemove.push(this.editor.onKeyUp((e:IKeyboardEvent) => this.onEditorKeyUp(e)));
 		this.timeoutPromise = null;
 		this.computePromise = null;
 		this.currentOccurences = {};
 		this.activeLinkDecorationId = null;
 		this.beginCompute();
+	}
+
+	public getId(): string {
+		return LinkDetector.ID;
 	}
 
 	public isComputing(): boolean {
@@ -147,27 +170,87 @@ class LinkDetector {
 		if (!this.editor.getModel()) {
 			return;
 		}
-		var mode = this.editor.getModel().getMode();
-		if (mode.linkSupport) {
-			this.computePromise = mode.linkSupport.computeLinks(this.editor.getModel().getAssociatedResource());
-			this.computePromise.then((links:Modes.ILink[]) => {
-				this.updateDecorations(links);
-				this.computePromise = null;
-			});
+
+		let modePromise:TPromise<ILink[]> = TPromise.as(null);
+		if (LinkProviderRegistry.has(this.editor.getModel())) {
+			modePromise = getLinks(this.editor.getModel());
 		}
+
+		let standardPromise:TPromise<ILink[]> = this.editorWorkerService.computeLinks(this.editor.getModel().uri);
+
+		this.computePromise = TPromise.join([modePromise, standardPromise]).then((r) => {
+			let a = r[0];
+			let b = r[1];
+			if (!a || a.length === 0) {
+				return b || [];
+			}
+			if (!b || b.length === 0) {
+				return a || [];
+			}
+			return LinkDetector._linksUnion(a.map(el => new Link(el)), b.map(el => new Link(el)));
+		});
+
+		this.computePromise.then((links:ILink[]) => {
+			this.updateDecorations(links);
+			this.computePromise = null;
+		});
 	}
 
-	private updateDecorations(links:Modes.ILink[]):void {
-		this.editor.changeDecorations((changeAccessor:EditorCommon.IModelDecorationsChangeAccessor) => {
-			var oldDecorations:string[] = [];
-			for (var decorationId in this.currentOccurences) {
-				if (this.currentOccurences.hasOwnProperty(decorationId)) {
-					var occurance = this.currentOccurences[decorationId];
-					oldDecorations.push(occurance.decorationId);
-				}
+	private static _linksUnion(oldLinks: Link[], newLinks: Link[]): Link[] {
+		// reunite oldLinks with newLinks and remove duplicates
+		var result: Link[] = [],
+			oldIndex: number,
+			oldLen: number,
+			newIndex: number,
+			newLen: number,
+			oldLink: Link,
+			newLink: Link,
+			comparisonResult: number;
+
+		for (oldIndex = 0, newIndex = 0, oldLen = oldLinks.length, newLen = newLinks.length; oldIndex < oldLen && newIndex < newLen;) {
+			oldLink = oldLinks[oldIndex];
+			newLink = newLinks[newIndex];
+
+			if (Range.areIntersectingOrTouching(oldLink.range, newLink.range)) {
+				// Remove the oldLink
+				oldIndex++;
+				continue;
 			}
 
-			var newDecorations:EditorCommon.IModelDeltaDecoration[] = [];
+			comparisonResult = Range.compareRangesUsingStarts(oldLink.range, newLink.range);
+
+			if (comparisonResult < 0) {
+				// oldLink is before
+				result.push(oldLink);
+				oldIndex++;
+			} else {
+				// newLink is before
+				result.push(newLink);
+				newIndex++;
+			}
+		}
+
+		for (; oldIndex < oldLen; oldIndex++) {
+			result.push(oldLinks[oldIndex]);
+		}
+		for (; newIndex < newLen; newIndex++) {
+			result.push(newLinks[newIndex]);
+		}
+
+		return result;
+	}
+
+	private updateDecorations(links:ILink[]):void {
+		this.editor.changeDecorations((changeAccessor:editorCommon.IModelDecorationsChangeAccessor) => {
+			var oldDecorations:string[] = [];
+			let keys = Object.keys(this.currentOccurences);
+			for (let i = 0, len = keys.length; i < len; i++) {
+				let decorationId = keys[i];
+				let occurance = this.currentOccurences[decorationId];
+				oldDecorations.push(occurance.decorationId);
+			}
+
+			var newDecorations:editorCommon.IModelDeltaDecoration[] = [];
 			if (links) {
 				// Not sure why this is sometimes null
 				for (var i = 0; i < links.length; i++) {
@@ -186,19 +269,19 @@ class LinkDetector {
 		});
 	}
 
-	private onEditorKeyDown(e:Keyboard.StandardKeyboardEvent):void {
+	private onEditorKeyDown(e:IKeyboardEvent):void {
 		if (e.keyCode === LinkDetector.TRIGGER_KEY_VALUE && this.lastMouseEvent) {
 			this.onEditorMouseMove(this.lastMouseEvent, e);
 		}
 	}
 
-	private onEditorKeyUp(e:Keyboard.StandardKeyboardEvent):void {
+	private onEditorKeyUp(e:IKeyboardEvent):void {
 		if (e.keyCode === LinkDetector.TRIGGER_KEY_VALUE) {
 			this.cleanUpActiveLinkDecoration();
 		}
 	}
 
-	private onEditorMouseMove(mouseEvent: EditorBrowser.IMouseEvent, withKey?:Keyboard.StandardKeyboardEvent):void {
+	private onEditorMouseMove(mouseEvent: IEditorMouseEvent, withKey?:IKeyboardEvent):void {
 		this.lastMouseEvent = mouseEvent;
 
 		if (this.isEnabled(mouseEvent, withKey)) {
@@ -228,7 +311,7 @@ class LinkDetector {
 		}
 	}
 
-	private onEditorMouseUp(mouseEvent: EditorBrowser.IMouseEvent):void {
+	private onEditorMouseUp(mouseEvent: IEditorMouseEvent):void {
 		if (!this.isEnabled(mouseEvent)) {
 			return;
 		}
@@ -267,9 +350,9 @@ class LinkDetector {
 			}
 		}
 
-		var url: Network.URL;
+		var url: URI;
 		try {
-			url = new Network.URL(absoluteUrl);
+			url = URI.parse(absoluteUrl);
 		} catch (err) {
 			// invalid url
 			this.messageService.show(Severity.Warning, nls.localize('invalid.url', 'Invalid URI: cannot open {0}', absoluteUrl));
@@ -286,10 +369,10 @@ class LinkDetector {
 			};
 		}
 
-		this.editorService.openEditor(input, openToSide).done(null, Errors.onUnexpectedError);
+		this.editorService.openEditor(input, openToSide).done(null, onUnexpectedError);
 	}
 
-	public getLinkOccurence(position: EditorCommon.IPosition): LinkOccurence {
+	public getLinkOccurence(position: editorCommon.IPosition): LinkOccurence {
 		var decorations = this.editor.getModel().getDecorationsInRange({
 			startLineNumber: position.lineNumber,
 			startColumn: position.column,
@@ -308,10 +391,9 @@ class LinkDetector {
 		return null;
 	}
 
-	private isEnabled(mouseEvent: EditorBrowser.IMouseEvent, withKey?:Keyboard.StandardKeyboardEvent):boolean {
-		return 	mouseEvent.target.type === EditorCommon.MouseTargetType.CONTENT_TEXT &&
-				(mouseEvent.event[LinkDetector.TRIGGER_MODIFIER] || (withKey && withKey.keyCode === LinkDetector.TRIGGER_KEY_VALUE)) &&
-				!!this.editor.getModel().getMode().linkSupport;
+	private isEnabled(mouseEvent: IEditorMouseEvent, withKey?:IKeyboardEvent):boolean {
+		return 	mouseEvent.target.type === editorCommon.MouseTargetType.CONTENT_TEXT &&
+				(mouseEvent.event[LinkDetector.TRIGGER_MODIFIER] || (withKey && withKey.keyCode === LinkDetector.TRIGGER_KEY_VALUE));
 	}
 
 	private stop():void {
@@ -326,10 +408,7 @@ class LinkDetector {
 	}
 
 	public dispose():void {
-		this.listenersToRemove.forEach((element) => {
-			element();
-		});
-		this.listenersToRemove = [];
+		this.listenersToRemove = dispose(this.listenersToRemove);
 		this.stop();
 	}
 }
@@ -338,37 +417,33 @@ class OpenLinkAction extends EditorAction {
 
 	static ID = 'editor.action.openLink';
 
-	private _linkDetector: LinkDetector;
-
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor,
-		@IEditorService editorService:IEditorService,
-		@IMessageService messageService:IMessageService
-		) {
+	constructor(
+		descriptor:editorCommon.IEditorActionDescriptorData,
+		editor:editorCommon.ICommonCodeEditor
+	) {
 		super(descriptor, editor, Behaviour.WidgetFocus | Behaviour.UpdateOnCursorPositionChange);
-
-		this._linkDetector = new LinkDetector(editor, editorService, messageService);
 	}
 
 	public dispose(): void {
-		this._linkDetector.dispose();
 		super.dispose();
 	}
 
 	public getEnablementState(): boolean {
-		if(this._linkDetector.isComputing()) {
+		if (LinkDetector.get(this.editor).isComputing()) {
 			// optimistic enablement while state is being computed
 			return true;
 		}
-		return !!this._linkDetector.getLinkOccurence(this.editor.getPosition());
+		return !!LinkDetector.get(this.editor).getLinkOccurence(this.editor.getPosition());
 	}
 
 	public run():TPromise<any> {
-		var link = this._linkDetector.getLinkOccurence(this.editor.getPosition());
+		var link = LinkDetector.get(this.editor).getLinkOccurence(this.editor.getPosition());
 		if(link) {
-			this._linkDetector.openLinkOccurence(link, false);
+			LinkDetector.get(this.editor).openLinkOccurence(link, false);
 		}
 		return TPromise.as(null);
 	}
 }
 
-CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(OpenLinkAction, OpenLinkAction.ID, nls.localize('label', "Open Link")));
+CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(OpenLinkAction, OpenLinkAction.ID, nls.localize('label', "Open Link"), void 0, 'Open Link'));
+EditorBrowserRegistry.registerEditorContribution(LinkDetector);

@@ -4,26 +4,24 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import {Promise, TPromise} from 'vs/base/common/winjs.base';
+import {TPromise} from 'vs/base/common/winjs.base';
 import nls = require('vs/nls');
-import errors = require('vs/base/common/errors');
 import {ThrottledDelayer} from 'vs/base/common/async';
-import strings = require('vs/base/common/strings');
 import URI from 'vs/base/common/uri';
-import {Registry} from 'vs/platform/platform';
 import {QuickOpenHandler, EditorQuickOpenEntry} from 'vs/workbench/browser/quickopen';
 import {QuickOpenModel, QuickOpenEntry, IHighlight} from 'vs/base/parts/quickopen/browser/quickOpenModel';
-import {IAutoFocus} from 'vs/base/parts/quickopen/browser/quickOpen';
-import {IEditorModesRegistry, Extensions} from 'vs/editor/common/modes/modesRegistry';
+import {IAutoFocus} from 'vs/base/parts/quickopen/common/quickOpen';
 import filters = require('vs/base/common/filters');
 import {IRange} from 'vs/editor/common/editorCommon';
-import {EditorInput} from 'vs/workbench/common/editor';
+import {EditorInput, IWorkbenchEditorConfiguration} from 'vs/workbench/common/editor';
 import labels = require('vs/base/common/labels');
-import {IWorkbenchEditorService, IFileInput} from 'vs/workbench/services/editor/common/editorService';
+import {IResourceInput} from 'vs/platform/editor/common/editor';
+import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
 import {IModeService} from 'vs/editor/common/services/modeService';
-import {NavigateTypesSupportRegistry, ITypeBearing} from '../common/search';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
+import {ITypeBearing, getNavigateToItems} from 'vs/workbench/parts/search/common/search';
 
 class SymbolEntry extends EditorQuickOpenEntry {
 	private name: string;
@@ -33,7 +31,17 @@ class SymbolEntry extends EditorQuickOpenEntry {
 	private type: string;
 	private range: IRange;
 
-	constructor(name: string, parameters: string, description: string, resource: URI, type: string, range: IRange, highlights: IHighlight[], editorService: IWorkbenchEditorService) {
+	constructor(
+		name: string,
+		parameters: string,
+		description: string,
+		resource: URI,
+		type: string,
+		range: IRange,
+		highlights: IHighlight[],
+		@IWorkbenchEditorService editorService: IWorkbenchEditorService,
+		@IConfigurationService private configurationService: IConfigurationService
+	) {
 		super(editorService);
 
 		this.name = name;
@@ -47,6 +55,10 @@ class SymbolEntry extends EditorQuickOpenEntry {
 
 	public getLabel(): string {
 		return this.name + this.parameters;
+	}
+
+	public getAriaLabel(): string {
+		return nls.localize('entryAriaLabel', "{0}, symbols picker", this.getLabel());
 	}
 
 	public getName(): string {
@@ -69,17 +81,18 @@ class SymbolEntry extends EditorQuickOpenEntry {
 		return this.type;
 	}
 
-	public getInput(): IFileInput | EditorInput {
-		let input: IFileInput = {
+	public getInput(): IResourceInput | EditorInput {
+		let input: IResourceInput = {
 			resource: this.resource,
+			options: {
+				pinned: !this.configurationService.getConfiguration<IWorkbenchEditorConfiguration>().workbench.editor.enablePreviewFromQuickOpen
+			}
 		};
 
 		if (this.range) {
-			input.options = {
-				selection: {
-					startLineNumber: this.range.startLineNumber,
-					startColumn: this.range.startColumn
-				}
+			input.options.selection = {
+				startLineNumber: this.range.startLineNumber,
+				startColumn: this.range.startColumn
 			};
 		}
 
@@ -89,10 +102,9 @@ class SymbolEntry extends EditorQuickOpenEntry {
 
 export class OpenSymbolHandler extends QuickOpenHandler {
 
-	private static SUPPORTED_OPEN_TYPES = ['class', 'interface', 'enum', 'function', 'method'];
-	private static SEARCH_DELAY = 500; // This delay acommodates for the user typing a word and then stops typing to start searching
+	private static SEARCH_DELAY = 500; // This delay accommodates for the user typing a word and then stops typing to start searching
 
-	private delayer: ThrottledDelayer;
+	private delayer: ThrottledDelayer<QuickOpenEntry[]>;
 	private isStandalone: boolean;
 
 	constructor(
@@ -103,12 +115,12 @@ export class OpenSymbolHandler extends QuickOpenHandler {
 	) {
 		super();
 
-		this.delayer = new ThrottledDelayer(OpenSymbolHandler.SEARCH_DELAY);
+		this.delayer = new ThrottledDelayer<QuickOpenEntry[]>(OpenSymbolHandler.SEARCH_DELAY);
 		this.isStandalone = true;
 	}
 
 	public setStandalone(standalone: boolean) {
-		this.delayer = standalone ? new ThrottledDelayer(OpenSymbolHandler.SEARCH_DELAY) : null;
+		this.delayer = standalone ? new ThrottledDelayer<QuickOpenEntry[]>(OpenSymbolHandler.SEARCH_DELAY) : null;
 		this.isStandalone = standalone;
 	}
 
@@ -135,21 +147,7 @@ export class OpenSymbolHandler extends QuickOpenHandler {
 
 	private doGetResults(searchValue: string): TPromise<QuickOpenEntry[]> {
 
-		let registry = <IEditorModesRegistry>Registry.as(Extensions.EditorModes);
-
-		// Find Types (and ignore error)
-		let bearings: ITypeBearing[] = [];
-		let promises = NavigateTypesSupportRegistry.getAll().map(support => {
-			return support.getNavigateToItems(searchValue).then(result => {
-				if (Array.isArray(result)) {
-					bearings.push(...result);
-				}
-			}, err => {
-				errors.onUnexpectedError(err);
-			});
-		});
-
-		return TPromise.join(promises).then(() => {
+		return getNavigateToItems(searchValue).then(bearings => {
 			return this.toQuickOpenEntries(bearings, searchValue);
 		});
 	}
@@ -159,9 +157,6 @@ export class OpenSymbolHandler extends QuickOpenHandler {
 
 		// Convert to Entries
 		types.forEach(element => {
-			if (!OpenSymbolHandler.SUPPORTED_OPEN_TYPES.some((type: string) => element.type === type)) {
-				return;
-			}
 
 			// Find Highlights
 			let highlights = filters.matchesFuzzy(searchValue, element.name);
@@ -192,7 +187,7 @@ export class OpenSymbolHandler extends QuickOpenHandler {
 						container = element.containerName || path;
 					}
 
-					results.push(new SymbolEntry(element.name, element.parameters, container, resource, element.type, element.range, highlights, this.editorService));
+					results.push(this.instantiationService.createInstance(SymbolEntry, element.name, element.parameters, container, resource, element.type, element.range, highlights));
 				}
 			}
 		});
@@ -206,23 +201,17 @@ export class OpenSymbolHandler extends QuickOpenHandler {
 	}
 
 	private sort(searchValue: string, elementA: SymbolEntry, elementB: SymbolEntry): number {
-		let elementAName = elementA.getName().toLowerCase();
-		let elementBName = elementB.getName().toLowerCase();
-
-		// Compare by name
-		let r = strings.localeCompare(elementAName, elementBName);
-		if (r !== 0) {
-			return r;
-		}
 
 		// Sort by Type if name is identical
-		let elementAType = elementA.getType();
-		let elementBType = elementB.getType();
-		if (elementAType !== elementBType) {
-			return OpenSymbolHandler.SUPPORTED_OPEN_TYPES.indexOf(elementAType) < OpenSymbolHandler.SUPPORTED_OPEN_TYPES.indexOf(elementBType) ? -1 : 1;
+		let elementAName = elementA.getName().toLowerCase();
+		let elementBName = elementB.getName().toLowerCase();
+		if (elementAName === elementBName) {
+			let elementAType = elementA.getType();
+			let elementBType = elementB.getType();
+			return elementAType.localeCompare(elementBType);
 		}
 
-		return 0; // Keep default sorting order otherwise
+		return QuickOpenEntry.compare(elementA, elementB, searchValue);
 	}
 
 	public getGroupLabel(): string {

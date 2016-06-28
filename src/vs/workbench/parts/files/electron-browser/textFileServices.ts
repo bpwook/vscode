@@ -6,142 +6,139 @@
 'use strict';
 
 import nls = require('vs/nls');
-import {Promise, TPromise} from 'vs/base/common/winjs.base';
-import {Registry} from 'vs/platform/platform';
-import {IEditorModesRegistry, Extensions as ModesExtensions} from 'vs/editor/common/modes/modesRegistry';
+import {TPromise} from 'vs/base/common/winjs.base';
 import paths = require('vs/base/common/paths');
 import strings = require('vs/base/common/strings');
-import {isWindows} from 'vs/base/common/platform';
+import {isWindows, isLinux} from 'vs/base/common/platform';
 import URI from 'vs/base/common/uri';
-import {Action} from 'vs/base/common/actions';
-import {UntitledEditorModel} from 'vs/workbench/browser/parts/editor/untitledEditorModel';
-import {TextFileService as BrowserTextFileService} from 'vs/workbench/parts/files/browser/textFileServices';
-import {CACHE, TextFileEditorModel} from 'vs/workbench/parts/files/browser/editors/textFileEditorModel';
-import {ITextFileOperationResult, ConfirmResult} from 'vs/workbench/parts/files/common/files';
-import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/browser/actionRegistry';
-import {SyncActionDescriptor} from 'vs/platform/actions/common/actions';
-import {IUntitledEditorService} from 'vs/workbench/services/untitled/browser/untitledEditorService';
-import {IMessageService, Severity} from 'vs/platform/message/common/message'
-import {IFileService} from 'vs/platform/files/common/files';
-import {IInstantiationService, INullService} from 'vs/platform/instantiation/common/instantiation';
+import {UntitledEditorModel} from 'vs/workbench/common/editor/untitledEditorModel';
+import {ConfirmResult} from 'vs/workbench/common/editor';
 import {IEventService} from 'vs/platform/event/common/event';
+import {TextFileService as AbstractTextFileService} from 'vs/workbench/parts/files/browser/textFileServices';
+import {CACHE, TextFileEditorModel} from 'vs/workbench/parts/files/common/editors/textFileEditorModel';
+import {ITextFileOperationResult, AutoSaveMode} from 'vs/workbench/parts/files/common/files';
+import {IUntitledEditorService} from 'vs/workbench/services/untitled/common/untitledEditorService';
+import {IFileService} from 'vs/platform/files/common/files';
+import {BinaryEditorModel} from 'vs/workbench/common/editor/binaryEditorModel';
+import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
 import {ILifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
+import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
+import {IModeService} from 'vs/editor/common/services/modeService';
+import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
+import {IWindowService} from 'vs/workbench/services/window/electron-browser/windowService';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
+import {IModelService} from 'vs/editor/common/services/modelService';
 
-import remote = require('remote');
-import ipc = require('ipc');
+export class TextFileService extends AbstractTextFileService {
 
-const Dialog = remote.require('dialog');
-
-export class TextFileService extends BrowserTextFileService {
+	private static MAX_CONFIRM_FILES = 10;
 
 	constructor(
-		@IEventService eventService: IEventService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
-		@IInstantiationService private instantiationService: IInstantiationService,
-		@IFileService private fileService: IFileService,
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IFileService fileService: IFileService,
 		@IUntitledEditorService private untitledEditorService: IUntitledEditorService,
-		@ILifecycleService lifecycleService: ILifecycleService
+		@ILifecycleService private lifecycleService: ILifecycleService,
+		@ITelemetryService telemetryService: ITelemetryService,
+		@IConfigurationService configurationService: IConfigurationService,
+		@IEventService eventService: IEventService,
+		@IModeService private modeService: IModeService,
+		@IWorkbenchEditorService editorService: IWorkbenchEditorService,
+		@IEditorGroupService editorGroupService: IEditorGroupService,
+		@IWindowService private windowService: IWindowService,
+		@IModelService modelService: IModelService
 	) {
-		super(eventService, contextService, instantiationService, lifecycleService);
+		super(contextService, instantiationService, configurationService, telemetryService, editorService, editorGroupService, eventService, fileService, modelService);
 
-		this.registerAutoSaveActions();
+		this.init();
 	}
 
-	protected onOptionsChanged(): void {
-		super.onOptionsChanged();
+	protected registerListeners(): void {
+		super.registerListeners();
 
-		this.registerAutoSaveActions();
-	}
-
-	private registerAutoSaveActions(): void {
-		let workbenchActionsRegistry = <IWorkbenchActionRegistry>Registry.as(ActionExtensions.WorkbenchActions);
-		workbenchActionsRegistry.unregisterWorkbenchAction(ToggleAutoSaveAction.ID);
-		workbenchActionsRegistry.registerWorkbenchAction(new SyncActionDescriptor(ToggleAutoSaveAction, ToggleAutoSaveAction.ID, this.contextService.isAutoSaveEnabled() ? nls.localize('disableAutoSave', "Disable Auto Save") : nls.localize('enableAutoSave', "Enable Auto Save")), nls.localize('filesCategory', "Files"));
+		// Lifecycle
+		this.lifecycleService.onWillShutdown(event => event.veto(this.beforeShutdown()));
+		this.lifecycleService.onShutdown(this.onShutdown, this);
 	}
 
 	public beforeShutdown(): boolean | TPromise<boolean> {
-		super.beforeShutdown();
-
-		if (!!this.contextService.getConfiguration().env.pluginDevelopmentPath) {
-			return false; // no veto when we are in plugin dev mode because we want to reload often
-		}
 
 		// Dirty files need treatment on shutdown
 		if (this.getDirty().length) {
-			let confirm = this.confirmSave();
 
-			// Save
-			if (confirm === ConfirmResult.SAVE) {
-				return this.saveAll(true /* includeUntitled */).then((result) => {
-
-					// Dispose saved untitled ones to not leave them around as dirty
-					result.results.forEach((res) => {
-						if (res.success && res.source.scheme === 'untitled') {
-							let input = this.untitledEditorService.get(res.source);
-							if (input) {
-								input.dispose();
-							}
-						}
-					});
-
-					if (result.results.some((r) => !r.success)) {
-						return true; // veto if some saves failed
+			// If auto save is enabled, save all files and then check again for dirty files
+			if (this.getAutoSaveMode() !== AutoSaveMode.OFF) {
+				return this.saveAll(false /* files only */).then(() => {
+					if (this.getDirty().length) {
+						return this.confirmBeforeShutdown(); // we still have dirty files around, so confirm normally
 					}
 
-					return false; // no veto
+					return false; // all good, no veto
 				});
 			}
 
-			// Don't Save
-			else if (confirm === ConfirmResult.DONT_SAVE) {
-				return false; // no veto
-			}
-
-			// Cancel
-			else if (confirm === ConfirmResult.CANCEL) {
-				return true; // veto
-			}
+			// Otherwise just confirm what to do
+			return this.confirmBeforeShutdown();
 		}
 
 		return false; // no veto
 	}
 
+	private confirmBeforeShutdown(): boolean | TPromise<boolean> {
+		let confirm = this.confirmSave();
+
+		// Save
+		if (confirm === ConfirmResult.SAVE) {
+			return this.saveAll(true /* includeUntitled */).then(result => {
+				if (result.results.some(r => !r.success)) {
+					return true; // veto if some saves failed
+				}
+
+				return false; // no veto
+			});
+		}
+
+		// Don't Save
+		else if (confirm === ConfirmResult.DONT_SAVE) {
+			return false; // no veto
+		}
+
+		// Cancel
+		else if (confirm === ConfirmResult.CANCEL) {
+			return true; // veto
+		}
+	}
+
+	private onShutdown(): void {
+		super.dispose();
+	}
+
 	public revertAll(resources?: URI[], force?: boolean): TPromise<ITextFileOperationResult> {
 
 		// Revert files
-		return super.revertAll(resources, force).then((r) => {
+		return super.revertAll(resources, force).then(r => {
 
 			// Revert untitled
-			let untitledInputs = this.untitledEditorService.getAll(resources);
-			untitledInputs.forEach((input) => {
-				if (input) {
-					input.dispose();
-
-					r.results.push({
-						source: input.getResource(),
-						success: true
-					});
-				}
-			});
+			const reverted = this.untitledEditorService.revertAll(resources);
+			reverted.forEach(res => r.results.push({ source: res, success: true }));
 
 			return r;
 		});
 	}
 
-	public getDirty(resource?: URI): URI[] {
+	public getDirty(resources?: URI[]): URI[] {
 
 		// Collect files
-		let dirty = super.getDirty(resource);
+		let dirty = super.getDirty(resources);
 
 		// Add untitled ones
-		if (!resource) {
+		if (!resources) {
 			dirty.push(...this.untitledEditorService.getDirty());
 		} else {
-			let input = this.untitledEditorService.get(resource);
-			if (input && input.isDirty()) {
-				dirty.push(input.getResource());
-			}
+			let dirtyUntitled = resources.map(r => this.untitledEditorService.get(r)).filter(u => u && u.isDirty()).map(u => u.getResource());
+			dirty.push(...dirtyUntitled);
 		}
 
 		return dirty;
@@ -152,48 +149,81 @@ export class TextFileService extends BrowserTextFileService {
 			return true;
 		}
 
-		return this.untitledEditorService.getDirty().some((dirty) => !resource || dirty.toString() === resource.toString());
+		return this.untitledEditorService.getDirty().some(dirty => !resource || dirty.toString() === resource.toString());
 	}
 
-	public confirmSave(resource?: URI): ConfirmResult {
-		let resourcesToConfirm = this.getDirty(resource);
+	public confirmSave(resources?: URI[]): ConfirmResult {
+		if (!!this.contextService.getConfiguration().env.extensionDevelopmentPath) {
+			return ConfirmResult.DONT_SAVE; // no veto when we are in extension dev mode because we cannot assum we run interactive (e.g. tests)
+		}
+
+		let resourcesToConfirm = this.getDirty(resources);
 		if (resourcesToConfirm.length === 0) {
 			return ConfirmResult.DONT_SAVE;
 		}
 
 		let message = [
-			resourcesToConfirm.length === 1 ? nls.localize('saveChangesMessage', "Do you want to save the changes you made to {0}?", paths.basename(resourcesToConfirm[0].fsPath)) : nls.localize('saveChangesMessages', "Do you want to save the changes to the following files?")
+			resourcesToConfirm.length === 1 ? nls.localize('saveChangesMessage', "Do you want to save the changes you made to {0}?", paths.basename(resourcesToConfirm[0].fsPath)) : nls.localize('saveChangesMessages', "Do you want to save the changes to the following {0} files?", resourcesToConfirm.length)
 		];
 
 		if (resourcesToConfirm.length > 1) {
 			message.push('');
-			message.push(...resourcesToConfirm.map((r) => paths.basename(r.fsPath)));
+			message.push(...resourcesToConfirm.slice(0, TextFileService.MAX_CONFIRM_FILES).map(r => paths.basename(r.fsPath)));
+
+			if (resourcesToConfirm.length > TextFileService.MAX_CONFIRM_FILES) {
+				if (resourcesToConfirm.length - TextFileService.MAX_CONFIRM_FILES === 1) {
+					message.push(nls.localize('moreFile', "...1 additional file not shown"));
+				} else {
+					message.push(nls.localize('moreFiles', "...{0} additional files not shown", resourcesToConfirm.length - TextFileService.MAX_CONFIRM_FILES));
+				}
+			}
+
 			message.push('');
 		}
 
-		let opts: remote.IMessageBoxOptions = {
+		// Button order
+		// Windows: Save | Don't Save | Cancel
+		// Mac: Save | Cancel | Don't Save
+		// Linux: Don't Save | Cancel | Save
+
+		const save = { label: resourcesToConfirm.length > 1 ? this.mnemonicLabel(nls.localize({ key: 'saveAll', comment: ['&& denotes a mnemonic'] }, "&&Save All")) : this.mnemonicLabel(nls.localize({ key: 'save', comment: ['&& denotes a mnemonic'] }, "&&Save")), result: ConfirmResult.SAVE };
+		const dontSave = { label: this.mnemonicLabel(nls.localize({ key: 'dontSave', comment: ['&& denotes a mnemonic'] }, "Do&&n't Save")), result: ConfirmResult.DONT_SAVE };
+		const cancel = { label: nls.localize('cancel', "Cancel"), result: ConfirmResult.CANCEL };
+
+		const buttons = [];
+		if (isWindows) {
+			buttons.push(save, dontSave, cancel);
+		} else if (isLinux) {
+			buttons.push(dontSave, cancel, save);
+		} else {
+			buttons.push(save, cancel, dontSave);
+		}
+
+		let opts: Electron.Dialog.ShowMessageBoxOptions = {
 			title: this.contextService.getConfiguration().env.appName,
 			message: message.join('\n'),
 			type: 'warning',
 			detail: nls.localize('saveChangesDetail', "Your changes will be lost if you don't save them."),
-			buttons: [
-				resourcesToConfirm.length > 1 ? nls.localize('saveAll', "Save All") : nls.localize('save', "Save"),
-				nls.localize('cancel', "Cancel"),
-				nls.localize('dontSave', "Don't Save")
-			],
+			buttons: buttons.map(b => b.label),
 			noLink: true,
-			cancelId: 1
+			cancelId: buttons.indexOf(cancel)
 		};
 
-		let res = Dialog.showMessageBox(remote.getCurrentWindow(), opts);
-		switch (res) {
-			case 0:
-				return ConfirmResult.SAVE;
-			case 1:
-				return ConfirmResult.CANCEL;
+		if (isLinux) {
+			opts.defaultId = 2;
 		}
 
-		return ConfirmResult.DONT_SAVE;
+		const choice = this.windowService.getWindow().showMessageBox(opts);
+
+		return buttons[choice].result;
+	}
+
+	private mnemonicLabel(label: string): string {
+		if (!isWindows) {
+			return label.replace(/\(&&\w\)|&&/g, ''); // no mnemonic support on mac/linux
+		}
+
+		return label.replace(/&&/g, '&');
 	}
 
 	public saveAll(includeUntitled?: boolean): TPromise<ITextFileOperationResult>;
@@ -203,9 +233,7 @@ export class TextFileService extends BrowserTextFileService {
 		// get all dirty
 		let toSave: URI[] = [];
 		if (Array.isArray(arg1)) {
-			(<URI[]>arg1).forEach((r) => {
-				toSave.push(...this.getDirty(r));
-			});
+			toSave = this.getDirty(arg1);
 		} else {
 			toSave = this.getDirty();
 		}
@@ -213,7 +241,7 @@ export class TextFileService extends BrowserTextFileService {
 		// split up between files and untitled
 		let filesToSave: URI[] = [];
 		let untitledToSave: URI[] = [];
-		toSave.forEach((s) => {
+		toSave.forEach(s => {
 			if (s.scheme === 'file') {
 				filesToSave.push(s);
 			} else if ((Array.isArray(arg1) || arg1 === true /* includeUntitled */) && s.scheme === 'untitled') {
@@ -226,43 +254,43 @@ export class TextFileService extends BrowserTextFileService {
 
 	private doSaveAll(fileResources: URI[], untitledResources: URI[]): TPromise<ITextFileOperationResult> {
 
-		// Preflight for untitled to handle cancellation from the dialog
-		let targetsForUntitled: URI[] = [];
-		for (let i = 0; i < untitledResources.length; i++) {
-			let untitled = this.untitledEditorService.get(untitledResources[i]);
-			if (untitled) {
-				let targetPath: string;
+		// Handle files first that can just be saved
+		return super.saveAll(fileResources).then(result => {
 
-				// Untitled with associated file path dont need to prompt
-				if (this.untitledEditorService.hasAssociatedFilePath(untitled.getResource())) {
-					targetPath = untitled.getResource().fsPath;
-				}
+			// Preflight for untitled to handle cancellation from the dialog
+			let targetsForUntitled: URI[] = [];
+			for (let i = 0; i < untitledResources.length; i++) {
+				let untitled = this.untitledEditorService.get(untitledResources[i]);
+				if (untitled) {
+					let targetPath: string;
 
-				// Otherwise ask user
-				else {
-					targetPath = this.promptForPathSync(this.suggestFileName(untitledResources[i]));
-					if (!targetPath) {
-						return Promise.as({
-							results: [...fileResources, ...untitledResources].map((r) => {
-								return {
-									source: r
-								};
-							})
-						});
+					// Untitled with associated file path don't need to prompt
+					if (this.untitledEditorService.hasAssociatedFilePath(untitled.getResource())) {
+						targetPath = untitled.getResource().fsPath;
 					}
+
+					// Otherwise ask user
+					else {
+						targetPath = this.promptForPath(this.suggestFileName(untitledResources[i]));
+						if (!targetPath) {
+							return TPromise.as({
+								results: [...fileResources, ...untitledResources].map(r => {
+									return {
+										source: r
+									};
+								})
+							});
+						}
+					}
+
+					targetsForUntitled.push(URI.file(targetPath));
 				}
-
-				targetsForUntitled.push(URI.file(targetPath));
 			}
-		}
-
-		// Handle files
-		return super.saveAll(fileResources).then((result) => {
 
 			// Handle untitled
-			let untitledSaveAsPromises: Promise[] = [];
+			let untitledSaveAsPromises: TPromise<void>[] = [];
 			targetsForUntitled.forEach((target, index) => {
-				let untitledSaveAsPromise = this.saveAs(untitledResources[index], target).then((uri) => {
+				let untitledSaveAsPromise = this.saveAs(untitledResources[index], target).then(uri => {
 					result.results.push({
 						source: untitledResources[index],
 						target: uri,
@@ -273,7 +301,7 @@ export class TextFileService extends BrowserTextFileService {
 				untitledSaveAsPromises.push(untitledSaveAsPromise);
 			});
 
-			return Promise.join(untitledSaveAsPromises).then(() => {
+			return TPromise.join(untitledSaveAsPromises).then(() => {
 				return result;
 			});
 		});
@@ -282,31 +310,29 @@ export class TextFileService extends BrowserTextFileService {
 	public saveAs(resource: URI, target?: URI): TPromise<URI> {
 
 		// Get to target resource
-		let targetPromise: TPromise<URI>;
-		if (target) {
-			targetPromise = Promise.as(target);
-		} else {
+		if (!target) {
 			let dialogPath = resource.fsPath;
 			if (resource.scheme === 'untitled') {
 				dialogPath = this.suggestFileName(resource);
 			}
 
-			targetPromise = this.promptForPathAsync(dialogPath).then((path) => path ? URI.file(path) : null);
+			const pathRaw = this.promptForPath(dialogPath);
+			if (pathRaw) {
+				target = URI.file(pathRaw);
+			}
 		}
 
-		return targetPromise.then((target) => {
-			if (!target) {
-				return null; // user canceled
-			}
+		if (!target) {
+			return TPromise.as(null); // user canceled
+		}
 
-			// Just save if target is same as models own resource
-			if (resource.toString() === target.toString()) {
-				return this.save(resource).then(() => resource);
-			}
+		// Just save if target is same as models own resource
+		if (resource.toString() === target.toString()) {
+			return this.save(resource).then(() => resource);
+		}
 
-			// Do it
-			return this.doSaveAs(resource, target);
-		});
+		// Do it
+		return this.doSaveAs(resource, target);
 	}
 
 	private doSaveAs(resource: URI, target?: URI): TPromise<URI> {
@@ -322,17 +348,43 @@ export class TextFileService extends BrowserTextFileService {
 			}
 		}
 
-		return modelPromise.then((model) => {
+		return modelPromise.then(model => {
 
 			// We have a model: Use it (can be null e.g. if this file is binary and not a text file or was never opened before)
 			if (model) {
-				return this.fileService.updateContent(target, model.getValue(), { charset: model.getEncoding() }).then(() => {
-					return target;
-				});
+				return this.doSaveTextFileAs(model, resource, target);
 			}
 
 			// Otherwise we can only copy
-			return this.fileService.copyFile(resource, target).then(() => target);
+			return this.fileService.copyFile(resource, target);
+		}).then(() => {
+
+			// Revert the source
+			return this.revert(resource).then(() => {
+
+				// Done: return target
+				return target;
+			});
+		});
+	}
+
+	private doSaveTextFileAs(sourceModel: TextFileEditorModel | UntitledEditorModel, resource: URI, target: URI): TPromise<void> {
+		// create the target file empty if it does not exist already
+		return this.fileService.resolveFile(target).then(stat => stat, () => null).then(stat => stat || this.fileService.createFile(target)).then(stat => {
+			// resolve a model for the file (which can be binary if the file is not a text file)
+			return this.editorService.resolveEditorModel({ resource: target }).then((targetModel: TextFileEditorModel) => {
+				// binary model: delete the file and run the operation again
+				if (targetModel instanceof BinaryEditorModel) {
+					return this.fileService.del(target).then(() => this.doSaveTextFileAs(sourceModel, resource, target));
+				}
+
+				// text model: take over encoding and model value from source model
+				targetModel.updatePreferredEncoding(sourceModel.getEncoding());
+				targetModel.textEditorModel.setValue(sourceModel.getValue());
+
+				// save model
+				return targetModel.save();
+			});
 		});
 	}
 
@@ -345,45 +397,33 @@ export class TextFileService extends BrowserTextFileService {
 		return this.untitledEditorService.get(untitledResource).suggestFileName();
 	}
 
-	private promptForPathAsync(defaultPath?: string): TPromise<string> {
-		return new TPromise<string>((c, e) => {
-			Dialog.showSaveDialog(remote.getCurrentWindow(), this.getSaveDialogOptions(defaultPath ? paths.normalize(defaultPath, true) : void 0), (path) => {
-				if (path && isWindows) {
-					path = strings.rtrim(path, '.*'); // Bug on Windows: When "All Files" is picked, the path gets an extra ".*"
-				}
-
-				c(path);
-			});
-		});
+	private promptForPath(defaultPath?: string): string {
+		return this.windowService.getWindow().showSaveDialog(this.getSaveDialogOptions(defaultPath ? paths.normalize(defaultPath, true) : void 0));
 	}
 
-	private promptForPathSync(defaultPath?: string): string {
-		let path = Dialog.showSaveDialog(remote.getCurrentWindow(), this.getSaveDialogOptions(defaultPath ? paths.normalize(defaultPath, true) : void 0));
-		if (path && isWindows) {
-			path = strings.rtrim(path, '.*'); // Bug on Windows: When "All Files" is picked, the path gets an extra ".*"
-		}
-
-		return path;
-	}
-
-	private getSaveDialogOptions(defaultPath?: string): remote.ISaveDialogOptions {
-		let options: remote.ISaveDialogOptions = {
+	private getSaveDialogOptions(defaultPath?: string): Electron.Dialog.SaveDialogOptions {
+		let options: Electron.Dialog.SaveDialogOptions = {
 			defaultPath: defaultPath
 		};
 
-		// Filters are only working well on Windows it seems
-		if (!isWindows) {
+		// Filters are working flaky in Electron and there are bugs. On Windows they are working
+		// somewhat but we see issues:
+		// - https://github.com/electron/electron/issues/3556
+		// - https://github.com/Microsoft/vscode/issues/451
+		// - Bug on Windows: When "All Files" is picked, the path gets an extra ".*"
+		// Until these issues are resolved, we disable the dialog file extension filtering.
+		let disable = true; // Simply using if (true) flags the code afterwards as not reachable.
+		if (disable) {
 			return options;
 		}
 
-		interface IFilter { name: string, extensions: string[] };
+		interface IFilter { name: string; extensions: string[]; }
 
 		// Build the file filter by using our known languages
 		let ext: string = paths.extname(defaultPath);
 		let matchingFilter: IFilter;
-		let modesRegistry = <IEditorModesRegistry>Registry.as(ModesExtensions.EditorModes);
-		let filters: IFilter[] = modesRegistry.getRegisteredLanguageNames().map(languageName => {
-			let extensions = modesRegistry.getExtensions(languageName);
+		let filters: IFilter[] = this.modeService.getRegisteredLanguageNames().map(languageName => {
+			let extensions = this.modeService.getExtensions(languageName);
 			if (!extensions || !extensions.length) {
 				return null;
 			}
@@ -413,20 +453,5 @@ export class TextFileService extends BrowserTextFileService {
 		options.filters = filters;
 
 		return options;
-	}
-}
-
-class ToggleAutoSaveAction extends Action {
-
-	public static ID = 'workbench.action.files.toggleAutoSave';
-
-	constructor(id: string, label: string, @INullService ns) {
-		super(id, label);
-	}
-
-	public run(): Promise {
-		ipc.send('vscode:toggleAutoSave');
-
-		return Promise.as(true);
 	}
 }

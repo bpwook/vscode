@@ -5,17 +5,15 @@
 'use strict';
 
 import {TPromise} from 'vs/base/common/winjs.base';
-import {Event, PropertyChangeEvent} from 'vs/base/common/events';
+import {Event as BaseEvent, PropertyChangeEvent} from 'vs/base/common/events';
 import URI from 'vs/base/common/uri';
-import {guessMimeTypes} from 'vs/base/common/mime';
-import {EventProvider} from 'vs/base/common/eventProvider';
-import {IModel, IEditorOptions} from 'vs/editor/common/editorCommon';
+import Event from 'vs/base/common/event';
+import {IModel, IEditorOptions, IRawText} from 'vs/editor/common/editorCommon';
 import {IDisposable} from 'vs/base/common/lifecycle';
-import {EncodingMode, EditorInput, IFileEditorInput} from 'vs/workbench/common/editor';
-import {IFileStat, FileChangesEvent, IFilesConfiguration} from 'vs/platform/files/common/files';
+import {EncodingMode, EditorInput, IFileEditorInput, ConfirmResult, IWorkbenchEditorConfiguration} from 'vs/workbench/common/editor';
+import {IFileStat, IFilesConfiguration, IBaseStat, IResolveContentOptions} from 'vs/platform/files/common/files';
 import {createDecorator, ServiceIdentifier} from 'vs/platform/instantiation/common/instantiation';
-import {ISearchService} from 'vs/platform/search/common/search';
-import {FileStat} from 'vs/workbench/parts/files/browser/views/explorerViewModel';
+import {FileStat} from 'vs/workbench/parts/files/common/explorerViewModel';
 
 /**
  * Explorer viewlet id.
@@ -38,11 +36,6 @@ export const TEXT_FILE_EDITOR_ID = 'workbench.editors.files.textFileEditor';
 export const BINARY_FILE_EDITOR_ID = 'workbench.editors.files.binaryFileEditor';
 
 /**
- * Marker ID for model entries.
- */
-export const WORKING_FILES_MODEL_ENTRY_CLASS_ID = 'workbench.workingFiles.model.entry.class';
-
-/**
  * API class to denote file editor inputs. Internal implementation is provided.
  *
  * Note: This class is not intended to be instantiated.
@@ -57,72 +50,22 @@ export abstract class FileEditorInput extends EditorInput implements IFileEditor
 
 	public abstract getMime(): string;
 
+	public abstract setPreferredEncoding(encoding: string): void;
+
 	public abstract setEncoding(encoding: string, mode: EncodingMode): void;
 
 	public abstract getEncoding(): string;
 }
 
-export interface IFilesConfiguration extends IFilesConfiguration {
+export interface IFilesConfiguration extends IFilesConfiguration, IWorkbenchEditorConfiguration {
 	explorer: {
-		workingFiles: {
-			maxVisible: number;
+		openEditors: {
+			visible: number;
 			dynamicHeight: boolean;
 		};
+		autoReveal: boolean;
 	};
 	editor: IEditorOptions;
-}
-
-export interface IWorkingFileModelChangeEvent {
-	added?: IWorkingFileEntry[];
-	removed?: IWorkingFileEntry[];
-}
-
-export interface IWorkingFilesModel {
-
-	onModelChange: EventProvider<(event: IWorkingFileModelChangeEvent) => void>;
-
-	onWorkingFileChange: EventProvider<(file: IWorkingFileEntry) => void>;
-
-	getEntries(excludeOutOfContext?: boolean): IWorkingFileEntry[];
-
-	first(): IWorkingFileEntry;
-	last(): IWorkingFileEntry;
-	next(start?: URI): IWorkingFileEntry;
-	previous(start?: URI): IWorkingFileEntry;
-
-	getOutOfWorkspaceContextEntries(): IWorkingFileEntry[];
-
-	count(): number;
-
-	addEntry(resource: URI): IWorkingFileEntry;
-	addEntry(stat: IFileStat): IWorkingFileEntry;
-	addEntry(entry: IWorkingFileEntry): IWorkingFileEntry;
-	addEntry(arg1: IFileStat | IWorkingFileEntry | URI): IWorkingFileEntry;
-
-	moveEntry(oldResource: URI, newResource: URI): void;
-
-	removeEntry(resource: URI): IWorkingFileEntry;
-	removeEntry(entry: IWorkingFileEntry): IWorkingFileEntry;
-	removeEntry(arg1: IWorkingFileEntry | URI): IWorkingFileEntry;
-
-	reorder(source: IWorkingFileEntry, target: IWorkingFileEntry): void;
-
-	hasEntry(resource: URI): boolean;
-	findEntry(resource: URI): IWorkingFileEntry;
-
-	clear(): void;
-}
-
-export interface IWorkingFileEntry {
-	resource: URI;
-	index: number;
-	dirty: boolean;
-	CLASS_ID: string;
-	isFile: boolean;
-	isUntitled: boolean;
-
-	setIndex(index: number): void;
-	setDirty(dirty: boolean): void;
 }
 
 export interface IFileResource {
@@ -143,17 +86,6 @@ export function asFileResource(obj: any): IFileResource {
 			mimes: stat.mime ? stat.mime.split(', ') : [],
 			isDirectory: stat.isDirectory
 		};
-	}
-
-	if (obj && (<IWorkingFileEntry>obj).CLASS_ID === WORKING_FILES_MODEL_ENTRY_CLASS_ID) {
-		let entry = <IWorkingFileEntry>obj;
-		if (entry.isFile) {
-			return {
-				resource: entry.resource,
-				mimes: guessMimeTypes(entry.resource.fsPath),
-				isDirectory: false
-			};
-		}
 	}
 
 	return null;
@@ -192,13 +124,24 @@ export const EventType = {
 };
 
 /**
+ * States the text text file editor model can be in.
+ */
+export enum ModelState {
+	SAVED,
+	DIRTY,
+	PENDING_SAVE,
+	CONFLICT,
+	ERROR
+}
+
+/**
  * Local file change events are being emitted when a file is added, removed, moved or its contents got updated. These events
  * are being emitted from within the workbench and are not reflecting the truth on the disk file system. For that, please
  * use FileChangesEvent instead.
  */
 export class LocalFileChangeEvent extends PropertyChangeEvent {
 
-	constructor(before?: IFileStat, after?: IFileStat, originalEvent?: Event) {
+	constructor(before?: IFileStat, after?: IFileStat, originalEvent?: BaseEvent) {
 		super(null, before, after, originalEvent);
 	}
 
@@ -248,27 +191,36 @@ export class LocalFileChangeEvent extends PropertyChangeEvent {
 /**
  * Text file change events are emitted when files are saved or reverted.
  */
-export class TextFileChangeEvent extends LocalFileChangeEvent {
+export class TextFileChangeEvent extends BaseEvent {
+	private _resource: URI;
 	private _model: IModel;
+	private _isAutoSaved: boolean;
 
-	constructor(model: IModel, before: IFileStat, after: IFileStat = before, originalEvent?: Event) {
-		super(before, after, originalEvent);
+	constructor(resource: URI, model: IModel) {
+		super();
 
+		this._resource = resource;
 		this._model = model;
+	}
+
+	public get resource(): URI {
+		return this._resource;
 	}
 
 	public get model(): IModel {
 		return this._model;
 	}
+
+	public setAutoSaved(autoSaved: boolean): void {
+		this._isAutoSaved = autoSaved;
+	}
+
+	public get isAutoSaved(): boolean {
+		return this._isAutoSaved;
+	}
 }
 
 export const TEXT_FILE_SERVICE_ID = 'textFileService';
-
-export enum ConfirmResult {
-	SAVE,
-	DONT_SAVE,
-	CANCEL
-}
 
 export interface ITextFileOperationResult {
 	results: IResult[];
@@ -280,10 +232,45 @@ export interface IResult {
 	success?: boolean;
 }
 
+export interface IAutoSaveConfiguration {
+	autoSaveDelay: number;
+	autoSaveFocusChange: boolean;
+}
+
+export enum AutoSaveMode {
+	OFF,
+	AFTER_SHORT_DELAY,
+	AFTER_LONG_DELAY,
+	ON_FOCUS_CHANGE
+}
+
 export var ITextFileService = createDecorator<ITextFileService>(TEXT_FILE_SERVICE_ID);
+
+export interface IRawTextContent extends IBaseStat {
+	
+	/**
+	 * The line grouped content of a text file.
+	 */
+	value: IRawText;
+
+	/**
+	 * The line grouped logical hash of a text file.
+	 */
+	valueLogicalHash: string;
+
+	/**
+	 * The encoding of the content if known.
+	 */
+	encoding: string;
+}
 
 export interface ITextFileService extends IDisposable {
 	serviceId: ServiceIdentifier<any>;
+
+	/**
+	 * Resolve the contents of a file identified by the resource.
+	 */
+	resolveTextContent(resource: URI, options?: IResolveContentOptions): TPromise<IRawTextContent>;
 
 	/**
 	 * A resource is dirty if it has unsaved changes or is an untitled file not yet saved.
@@ -294,12 +281,12 @@ export interface ITextFileService extends IDisposable {
 	isDirty(resource?: URI): boolean;
 
 	/**
-	 * Returs all resources that are currently dirty matching the provided resource or all dirty resources.
+	 * Returns all resources that are currently dirty matching the provided resources or all dirty resources.
 	 *
-	 * @param resource the resource to check for being dirty. If it is not specified, will check for
+	 * @param resources the resources to check for being dirty. If it is not specified, will check for
 	 * all dirty resources.
 	 */
-	getDirty(resource?: URI): URI[];
+	getDirty(resources?: URI[]): URI[];
 
 	/**
 	 * Saves the resource.
@@ -342,14 +329,25 @@ export interface ITextFileService extends IDisposable {
 	revertAll(resources?: URI[], force?: boolean): TPromise<ITextFileOperationResult>;
 
 	/**
-	 * Brings up the confirm dialog to either save, dont save or cancel.
+	 * Brings up the confirm dialog to either save, don't save or cancel.
 	 *
-	 * @param resource the resource of the file to ask for confirmation.
+	 * @param resources the resources of the files to ask for confirmation or null if
+	 * confirming for all dirty resources.
 	 */
-	confirmSave(resource?: URI): ConfirmResult;
+	confirmSave(resources?: URI[]): ConfirmResult;
 
 	/**
-	 * Provides access to the list of working files.
+	 * Convinient fast access to the current auto save mode.
 	 */
-	getWorkingFilesModel(): IWorkingFilesModel;
+	getAutoSaveMode(): AutoSaveMode;
+
+	/**
+	 * Convinient fast access to the raw configured auto save settings.
+	 */
+	getAutoSaveConfiguration(): IAutoSaveConfiguration;
+
+	/**
+	 * Event is fired with the auto save configuration whenever it changes.
+	 */
+	onAutoSaveConfigurationChange: Event<IAutoSaveConfiguration>;
 }

@@ -7,49 +7,38 @@
 import nls = require('vs/nls');
 import winjs = require('vs/base/common/winjs.base');
 import actions = require('vs/base/common/actions');
-import Constants = require('vs/workbench/common/constants');
 import {SyncActionDescriptor} from 'vs/platform/actions/common/actions';
 import {IMessageService, Severity} from 'vs/platform/message/common/message';
-import {IStorageService, StorageScope} from 'vs/platform/storage/common/storage';
 import platform = require('vs/platform/platform');
-import commonPlatform = require('vs/base/common/platform');
-import workbenchActionRegistry = require('vs/workbench/browser/actionRegistry');
-import Themes = require('vs/platform/theme/common/themes');
-import {IQuickOpenService, IPickOpenEntry} from 'vs/workbench/services/quickopen/browser/quickOpenService';
+import workbenchActionRegistry = require('vs/workbench/common/actionRegistry');
+import {IQuickOpenService, IPickOpenEntry} from 'vs/workbench/services/quickopen/common/quickOpenService';
 import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
-import {IThemeService, ITheme} from 'vs/workbench/services/themes/node/themeService';
-
-import ipc = require('ipc');
+import {IThemeService} from 'vs/workbench/services/themes/common/themeService';
+import {RunOnceScheduler} from 'vs/base/common/async';
 
 class SelectThemeAction extends actions.Action {
 
 	public static ID = 'workbench.action.selectTheme';
-	public static LABEL = nls.localize('selectTheme.label', 'Color Theme');
+	public static LABEL = nls.localize('selectTheme.label', "Color Theme");
 
 	constructor(
 		id: string,
 		label: string,
 		@IWorkspaceContextService private contextService: IWorkspaceContextService,
 		@IQuickOpenService private quickOpenService: IQuickOpenService,
-		@IStorageService private storageService: IStorageService,
 		@IMessageService private messageService: IMessageService,
 		@IThemeService private themeService: IThemeService
 	) {
 		super(id, label);
 	}
 
-	public run(): winjs.Promise {
+	public run(): winjs.TPromise<void> {
 
 		return this.themeService.getThemes().then(contributedThemes => {
-			let currentTheme = this.storageService.get(Constants.Preferences.THEME, StorageScope.GLOBAL, Themes.DEFAULT_THEME_ID);
-			let selectedIndex = 0;
+			let currentTheme = this.themeService.getTheme();
 
 			let picks: IPickOpenEntry[] = [];
-			Themes.getBaseThemes(commonPlatform.isWindows).forEach(baseTheme => {
-				picks.push({ label: Themes.toLabel(baseTheme), id: Themes.toId(baseTheme), description: nls.localize('themes.defaultTheme', "Default color theme") });
-			});
 
-			let contributedThemesById : { [id:string]: ITheme } = {};
 			contributedThemes.forEach(theme => {
 				picks.push({ id: theme.id, label: theme.label, description: theme.description });
 				contributedThemes[theme.id] = theme;
@@ -57,41 +46,41 @@ class SelectThemeAction extends actions.Action {
 
 			picks = picks.sort((t1, t2) => t1.label.localeCompare(t2.label));
 
-			let selectedPickIndex:number;
+			let selectedPickIndex: number;
 			picks.forEach((p, index) => {
 				if (p.id === currentTheme) {
 					selectedPickIndex = index;
 				}
 			});
 
-			let pickTheme = pick => {
+			let selectTheme = (pick, broadcast) => {
 				if (pick) {
 					let themeId = pick.id;
-					if (!contributedThemesById[themeId]) {
-						// built-in theme
-						ipc.send('vscode:changeTheme', themeId);
-					} else {
-						// before applying, check that it can be loaded
-						return this.themeService.loadThemeCSS(themeId).then(_ => {
-							ipc.send('vscode:changeTheme', themeId);
-						}, error => {
-							this.messageService.show(Severity.Info, nls.localize('problemChangingTheme', "Problem loading theme: {0}", error.message));
-						});
-					}
+					this.themeService.setTheme(themeId, broadcast).then(null, error => {
+						this.messageService.show(Severity.Info, nls.localize('problemChangingTheme', "Problem loading theme: {0}", error.message));
+					});
 				} else {
-					// undo changes
-					if (this.storageService.get(Constants.Preferences.THEME, StorageScope.GLOBAL) !== currentTheme) {
-						ipc.send('vscode:changeTheme', currentTheme);
-					}
+					this.themeService.setTheme(currentTheme, broadcast);
 				}
-				return winjs.Promise.as(null);
 			};
 
-			return this.quickOpenService.pick(picks, { placeHolder: nls.localize('themes.selectTheme', "Select Color Theme"), autoFocus: { autoFocusIndex: selectedPickIndex }}).then(pickTheme, null, pickTheme);
+			let themeToPreview : IPickOpenEntry = null;
+			let previewThemeScheduler = new RunOnceScheduler(() => {
+				selectTheme(themeToPreview, false);
+			}, 100);
+			let previewTheme = pick => {
+				themeToPreview = pick;
+				previewThemeScheduler.schedule();
+			};
+			let pickTheme = pick => {
+				previewThemeScheduler.dispose();
+				selectTheme(pick, true);
+			};
+			return this.quickOpenService.pick(picks, { placeHolder: nls.localize('themes.selectTheme', "Select Color Theme"), autoFocus: { autoFocusIndex: selectedPickIndex } }).then(pickTheme, null, previewTheme);
 		});
 	}
 }
 
 const category = nls.localize('preferences', "Preferences");
-let workbenchActionsRegistry = <workbenchActionRegistry.IWorkbenchActionRegistry> platform.Registry.as(workbenchActionRegistry.Extensions.WorkbenchActions);
-workbenchActionsRegistry.registerWorkbenchAction(new SyncActionDescriptor(SelectThemeAction, SelectThemeAction.ID, SelectThemeAction.LABEL), category);
+let workbenchActionsRegistry = <workbenchActionRegistry.IWorkbenchActionRegistry>platform.Registry.as(workbenchActionRegistry.Extensions.WorkbenchActions);
+workbenchActionsRegistry.registerWorkbenchAction(new SyncActionDescriptor(SelectThemeAction, SelectThemeAction.ID, SelectThemeAction.LABEL), 'Preferences: Color Theme', category);

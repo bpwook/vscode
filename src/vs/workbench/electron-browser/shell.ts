@@ -7,179 +7,120 @@
 
 import 'vs/css!./media/shell';
 
-import 'vs/css!vs/editor/css/vs-theme';
-import 'vs/css!vs/editor/css/vs-dark-theme';
-import 'vs/css!vs/editor/css/hc-black-theme';
-import 'vs/css!vs/workbench/browser/media/vs-theme';
-import 'vs/css!vs/workbench/browser/media/vs-dark-theme';
-import 'vs/css!vs/workbench/browser/media/hc-black-theme';
-
-import {Promise,TPromise} from 'vs/base/common/winjs.base';
+import * as nls from 'vs/nls';
+import {TPromise} from 'vs/base/common/winjs.base';
+import * as platform from 'vs/base/common/platform';
 import {Dimension, Builder, $} from 'vs/base/browser/builder';
-import objects = require('vs/base/common/objects');
-import env = require('vs/base/common/flags');
 import dom = require('vs/base/browser/dom');
-import Event, { Emitter } from 'vs/base/common/event';
-import { IDisposable } from 'vs/base/common/lifecycle';
+import aria = require('vs/base/browser/ui/aria/aria');
+import {dispose, IDisposable, Disposables} from 'vs/base/common/lifecycle';
 import errors = require('vs/base/common/errors');
 import {ContextViewService} from 'vs/platform/contextview/browser/contextViewService';
-import {ContextMenuService} from 'vs/workbench/services/contextview/electron-browser/contextmenuService';
-import {Preferences} from 'vs/workbench/common/constants';
 import timer = require('vs/base/common/timer');
 import {Workbench} from 'vs/workbench/browser/workbench';
-import {Storage} from 'vs/workbench/browser/storage';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {ElectronTelemetryService} from  'vs/platform/telemetry/electron-browser/electronTelemetryService';
+import {Storage, inMemoryLocalStorageInstance} from 'vs/workbench/common/storage';
+import {ITelemetryService, NullTelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {ITelemetryAppenderChannel, TelemetryAppenderClient} from 'vs/platform/telemetry/common/telemetryIpc';
+import {TelemetryService, ITelemetryServiceConfig} from  'vs/platform/telemetry/common/telemetryService';
+import {IdleMonitor, UserStatus} from  'vs/platform/telemetry/browser/idleMonitor';
+import ErrorTelemetry from 'vs/platform/telemetry/browser/errorTelemetry';
+import {resolveWorkbenchCommonProperties} from 'vs/platform/telemetry/node/workbenchCommonProperties';
 import {ElectronIntegration} from 'vs/workbench/electron-browser/integration';
 import {Update} from 'vs/workbench/electron-browser/update';
+import {WorkspaceStats} from 'vs/workbench/services/telemetry/common/workspaceStats';
 import {IWindowService, WindowService} from 'vs/workbench/services/window/electron-browser/windowService';
 import {MessageService} from 'vs/workbench/services/message/electron-browser/messageService';
 import {RequestService} from 'vs/workbench/services/request/node/requestService';
 import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
-import {MigrationConfigurationService} from 'vs/workbench/services/configuration/common/configurationService';
 import {FileService} from 'vs/workbench/services/files/electron-browser/fileService';
 import {SearchService} from 'vs/workbench/services/search/node/searchService';
 import {LifecycleService} from 'vs/workbench/services/lifecycle/electron-browser/lifecycleService';
-import PluginWorkbenchKeybindingService from 'vs/workbench/services/keybinding/browser/pluginKeybindingService';
 import {MainThreadService} from 'vs/workbench/services/thread/electron-browser/threadService';
 import {MarkerService} from 'vs/platform/markers/common/markerService';
-import {IActionsService} from 'vs/platform/actions/common/actions';
-import ActionsService from 'vs/platform/actions/common/actionsService';
 import {IModelService} from 'vs/editor/common/services/modelService';
 import {ModelServiceImpl} from 'vs/editor/common/services/modelServiceImpl';
+import {ICompatWorkerService} from 'vs/editor/common/services/compatWorkerService';
+import {MainThreadCompatWorkerService} from 'vs/editor/common/services/compatWorkerServiceMain';
 import {CodeEditorServiceImpl} from 'vs/editor/browser/services/codeEditorServiceImpl';
 import {ICodeEditorService} from 'vs/editor/common/services/codeEditorService';
-import {MainProcessVSCodeAPIHelper} from 'vs/workbench/api/browser/pluginHost.api.impl';
-import {MainProcessPluginService} from 'vs/platform/plugins/common/nativePluginService';
-import {MainThreadDocuments} from 'vs/workbench/api/common/pluginHostDocuments';
-import {MainProcessTextMateSyntax} from 'vs/editor/node/textMate/TMSyntax';
-import {MainProcessTextMateSnippet} from 'vs/editor/node/textMate/TMSnippets';
-import {LanguageConfigurationFileHandler} from 'vs/editor/node/languageConfiguration';
-import {MainThreadFileSystemEventService} from 'vs/workbench/api/common/pluginHostFileSystemEventService';
-import {MainThreadQuickOpen} from 'vs/workbench/api/browser/pluginHostQuickOpen';
-import {MainThreadStatusBar} from 'vs/workbench/api/browser/pluginHostStatusBar';
-import {MainThreadCommands} from 'vs/workbench/api/common/pluginHostCommands';
-import {RemoteTelemetryServiceHelper} from 'vs/platform/telemetry/common/abstractRemoteTelemetryService';
-import {MainThreadDiagnostics} from 'vs/workbench/api/common/pluginHostDiagnostics';
-import {MainThreadOutputService} from 'vs/workbench/api/browser/extHostOutputService';
-import {MainThreadMessageService} from 'vs/workbench/api/common/pluginHostMessageService';
-import {MainThreadLanguages} from 'vs/workbench/api/common/extHostLanguages';
-import {MainThreadEditors} from 'vs/workbench/api/common/pluginHostEditors';
-import {MainThreadWorkspace} from 'vs/workbench/api/browser/pluginHostWorkspace';
-import {MainThreadConfiguration} from 'vs/workbench/api/common/pluginHostConfiguration';
-import {LanguageFeatures} from 'vs/workbench/api/common/languageFeatures';
-import {EventService} from 'vs/platform/event/common/eventService';
+import {EditorWorkerServiceImpl} from 'vs/editor/common/services/editorWorkerServiceImpl';
+import {IEditorWorkerService} from 'vs/editor/common/services/editorWorkerService';
+import {MainProcessExtensionService} from 'vs/workbench/api/node/mainThreadExtensionService';
 import {IOptions} from 'vs/workbench/common/options';
-import themes = require('vs/platform/theme/common/themes');
-import {WorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
-import {IStorageService, StorageScope, StorageEvent, StorageEventType} from 'vs/platform/storage/common/storage';
-import {MainThreadStorage} from 'vs/platform/storage/common/remotable.storage';
-import {IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import {create as createInstantiationService } from 'vs/platform/instantiation/common/instantiationService';
-import {IContextViewService, IContextMenuService} from 'vs/platform/contextview/browser/contextView';
+import {IStorageService} from 'vs/platform/storage/common/storage';
+import {ServiceCollection} from 'vs/platform/instantiation/common/serviceCollection';
+import {InstantiationService} from 'vs/platform/instantiation/common/instantiationService';
+import {IContextViewService} from 'vs/platform/contextview/browser/contextView';
 import {IEventService} from 'vs/platform/event/common/event';
 import {IFileService} from 'vs/platform/files/common/files';
-import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
 import {ILifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
-import {IMarkerService, IMarkerData} from 'vs/platform/markers/common/markers';
+import {IMarkerService} from 'vs/platform/markers/common/markers';
 import {IMessageService, Severity} from 'vs/platform/message/common/message';
 import {IRequestService} from 'vs/platform/request/common/request';
 import {ISearchService} from 'vs/platform/search/common/search';
-import {IThreadService} from 'vs/platform/thread/common/thread';
+import {IThreadService} from 'vs/workbench/services/thread/common/threadService';
 import {IWorkspaceContextService, IConfiguration, IWorkspace} from 'vs/platform/workspace/common/workspace';
-import {IPluginService} from 'vs/platform/plugins/common/plugins';
+import {IExtensionService} from 'vs/platform/extensions/common/extensions';
 import {MainThreadModeServiceImpl} from 'vs/editor/common/services/modeServiceImpl';
 import {IModeService} from 'vs/editor/common/services/modeService';
-import {IUntitledEditorService, UntitledEditorService} from 'vs/workbench/services/untitled/browser/untitledEditorService';
+import {IUntitledEditorService, UntitledEditorService} from 'vs/workbench/services/untitled/common/untitledEditorService';
 import {CrashReporter} from 'vs/workbench/electron-browser/crashReporter';
-import {IThemeService, ThemeService} from 'vs/workbench/services/themes/node/themeService';
-import { IServiceCtor, isServiceEvent } from 'vs/base/common/service';
-import { connect, Client } from 'vs/base/node/service.net';
-import { IExtensionsService } from 'vs/workbench/parts/extensions/common/extensions';
-import { ExtensionsService } from 'vs/workbench/parts/extensions/electron-browser/extensionsService';
+import {IThemeService} from 'vs/workbench/services/themes/common/themeService';
+import {ThemeService} from 'vs/workbench/services/themes/electron-browser/themeService';
+import {getDelayedChannel} from 'vs/base/parts/ipc/common/ipc';
+import {connect} from 'vs/base/parts/ipc/node/ipc.net';
+import {IExtensionManagementChannel, ExtensionManagementChannelClient} from 'vs/platform/extensionManagement/common/extensionManagementIpc';
+import {IExtensionManagementService} from 'vs/platform/extensionManagement/common/extensionManagement';
+import {ReloadWindowAction} from 'vs/workbench/electron-browser/actions';
+import 'vs/platform/opener/electron-browser/opener.contribution'; // self registering service
 
 /**
- * This ugly beast is needed because at the point when we need shared services
- * in the instantiation service, the connection to the shared process is not yet
- * completed. This create a delayed service wrapper that waits on that connection
- * and then relays all requests to the shared services.
- *
- * TODO@Joao remove
+ * Services that we require for the Shell
  */
-export function getDelayedService<TService>(clientPromise: TPromise<Client>, serviceName: string, serviceCtor: IServiceCtor<TService>): TService {
-	let _servicePromise: TPromise<TService>;
-	let servicePromise = () => {
-		if (!_servicePromise) {
-			_servicePromise = clientPromise.then(client => client.getService(serviceName, serviceCtor));
-		}
-		return _servicePromise;
-	};
-
-	return Object.keys(serviceCtor.prototype)
-		.filter(key => key !== 'constructor')
-		.reduce((result, key) => {
-			if (isServiceEvent(serviceCtor.prototype[key])) {
-				let promise: Promise;
-				let disposable: IDisposable;
-
-				const emitter = new Emitter<any>({
-					onFirstListenerAdd: () => {
-						promise = servicePromise().then(service => {
-							disposable = service[key](e => emitter.fire(e));
-						});
-					},
-					onLastListenerRemove: () => {
-						if (disposable) {
-							disposable.dispose();
-							disposable = null;
-						}
-						promise.cancel();
-						promise = null;
-					}
-				});
-
-				return objects.assign(result, { [key]: emitter.event });
-			}
-
-			return objects.assign(result, {
-				[key]: (...args) => {
-					return servicePromise().then(service => service[key](...args));
-				}
-			});
-		}, <TService> {});
+export interface ICoreServices {
+	contextService: IWorkspaceContextService;
+	eventService: IEventService;
+	configurationService: IConfigurationService;
 }
 
 /**
- * The Monaco Workbench Shell contains the Monaco workbench with a rich header containing navigation and the activity bar.
+ * The workbench shell contains the workbench with a rich header containing navigation and the activity bar.
  * With the Shell being the top level element in the page, it is also responsible for driving the layouting.
  */
 export class WorkbenchShell {
-	private storageServiceInstance: IStorageService;
-	private messageServiceInstance: IMessageService;
-	private contextViewServiceInstance: ContextViewService;
-	private windowServiceInstance: IWindowService;
-	private threadServiceInstance: MainThreadService;
-	private themeService: IThemeService;
+	private storageService: IStorageService;
+	private messageService: MessageService;
+	private eventService: IEventService;
+	private contextViewService: ContextViewService;
+	private windowService: IWindowService;
+	private threadService: MainThreadService;
+	private configurationService: IConfigurationService;
+	private themeService: ThemeService;
+	private contextService: IWorkspaceContextService;
+	private telemetryService: ITelemetryService;
 
 	private container: HTMLElement;
-	private toUnbind: { (): void; }[];
+	private toUnbind: IDisposable[];
 	private previousErrorValue: string;
 	private previousErrorTime: number;
 	private content: HTMLElement;
 	private contentsContainer: Builder;
-	private currentTheme: string;
 
 	private configuration: IConfiguration;
 	private workspace: IWorkspace;
 	private options: IOptions;
 	private workbench: Workbench;
 
-	constructor(container: HTMLElement, workspace: IWorkspace, configuration: IConfiguration, options: IOptions) {
+	constructor(container: HTMLElement, workspace: IWorkspace, services: ICoreServices, configuration: IConfiguration, options: IOptions) {
 		this.container = container;
 
 		this.workspace = workspace;
 		this.configuration = configuration;
-		this.options = objects.mixin({}, options);
+		this.options = options;
+
+		this.contextService = services.contextService;
+		this.eventService = services.eventService;
+		this.configurationService = services.configurationService;
 
 		this.toUnbind = [];
 		this.previousErrorTime = 0;
@@ -187,27 +128,26 @@ export class WorkbenchShell {
 
 	private createContents(parent: Builder): Builder {
 
+		// ARIA
+		aria.setARIAContainer(document.body);
+
 		// Workbench Container
 		let workbenchContainer = $(parent).div();
 
 		// Instantiation service with services
-		let service = this.initInstantiationService();
+		let [instantiationService, serviceCollection] = this.initServiceCollection();
 
 		//crash reporting
 		if (!!this.configuration.env.crashReporter) {
-			let crashReporter = service.createInstance(CrashReporter, this.configuration.env.version, this.configuration.env.commitHash);
+			let crashReporter = instantiationService.createInstance(CrashReporter, this.configuration.env.version, this.configuration.env.commitHash);
 			crashReporter.start(this.configuration.env.crashReporter);
 		}
 
-		const sharedProcessClientPromise = connect(process.env['VSCODE_SHARED_IPC_HOOK']);
-		sharedProcessClientPromise.done(null, errors.onUnexpectedError);
-		service.addSingleton(IExtensionsService, getDelayedService<IExtensionsService>(sharedProcessClientPromise, 'ExtensionService', ExtensionsService));
-
 		// Workbench
-		this.workbench = new Workbench(workbenchContainer.getHTMLElement(), this.workspace, this.configuration, this.options, service);
+		this.workbench = instantiationService.createInstance(Workbench, workbenchContainer.getHTMLElement(), this.workspace, this.configuration, this.options, serviceCollection);
 		this.workbench.startup({
-			onServicesCreated: () => {
-				this.initPluginSystem();
+			onWorkbenchStarted: (customKeybindingsCount) => {
+				this.onWorkbenchStarted(customKeybindingsCount);
 			}
 		});
 
@@ -229,115 +169,146 @@ export class WorkbenchShell {
 		return workbenchContainer;
 	}
 
-	private initInstantiationService(): IInstantiationService {
-		let eventServiceInstance = new EventService();
+	private onWorkbenchStarted(customKeybindingsCount: number): void {
 
-		let contextServiceInstance = new WorkspaceContextService(eventServiceInstance, this.workspace, this.configuration, this.options);
-		contextServiceInstance.getConfiguration().additionalWorkerServices = [
-			{ serviceId: 'requestService', moduleName: 'vs/workbench/services/request/common/requestService', ctorName: 'WorkerRequestService' }
-		];
+		// Log to telemetry service
+		let windowSize = {
+			innerHeight: window.innerHeight,
+			innerWidth: window.innerWidth,
+			outerHeight: window.outerHeight,
+			outerWidth: window.outerWidth
+		};
 
-		this.windowServiceInstance = new WindowService();
-		this.storageServiceInstance = new Storage(contextServiceInstance);
+		this.telemetryService.publicLog('workspaceLoad',
+			{
+				userAgent: navigator.userAgent,
+				windowSize: windowSize,
+				emptyWorkbench: !this.contextService.getWorkspace(),
+				customKeybindingsCount,
+				theme: this.themeService.getTheme(),
+				language: platform.language
+			});
 
-		// no telemetry in a window for plugin development!
-		let enableTelemetry = this.configuration.env.isBuilt && !this.configuration.env.pluginDevelopmentPath ? !!this.configuration.env.enableTelemetry : false;
-		let telemetryServiceInstance = new ElectronTelemetryService(this.storageServiceInstance, { enableTelemetry: enableTelemetry, version: this.configuration.env.version, commitHash: this.configuration.env.commitHash });
+		let workspaceStats: WorkspaceStats = <WorkspaceStats>this.workbench.getInstantiationService().createInstance(WorkspaceStats);
+		workspaceStats.reportWorkspaceTags();
 
-		let keybindingServiceInstance = new PluginWorkbenchKeybindingService(contextServiceInstance, eventServiceInstance, telemetryServiceInstance, <any>window);
-
-		this.messageServiceInstance = new MessageService(contextServiceInstance, this.windowServiceInstance, telemetryServiceInstance, keybindingServiceInstance);
-		keybindingServiceInstance.setMessageService(this.messageServiceInstance);
-
-		let configServiceInstance = new MigrationConfigurationService(
-			contextServiceInstance,
-			eventServiceInstance,
-			this.messageServiceInstance
-		);
-
-		let fileServiceInstance = new FileService(
-			configServiceInstance,
-			eventServiceInstance,
-			contextServiceInstance
-		);
-
-		this.contextViewServiceInstance = new ContextViewService(this.container, telemetryServiceInstance, this.messageServiceInstance);
-
-		let lifecycleServiceInstance = new LifecycleService(this.messageServiceInstance, this.windowServiceInstance);
-		lifecycleServiceInstance.onShutdown.add(() => fileServiceInstance.dispose());
-
-		this.threadServiceInstance = new MainThreadService(contextServiceInstance, this.messageServiceInstance, this.windowServiceInstance);
-		lifecycleServiceInstance.onShutdown.add(() => this.threadServiceInstance.dispose());
-
-		let requestServiceInstance = new RequestService(
-			contextServiceInstance,
-			configServiceInstance,
-			telemetryServiceInstance
-		);
-		this.threadServiceInstance.registerInstance(requestServiceInstance);
-		lifecycleServiceInstance.onShutdown.add(() => requestServiceInstance.dispose());
-
-		let markerServiceInstance = new MarkerService(this.threadServiceInstance);
-
-		let pluginService = new MainProcessPluginService(contextServiceInstance, this.threadServiceInstance, this.messageServiceInstance, telemetryServiceInstance);
-		keybindingServiceInstance.setPluginService(pluginService);
-
-		let modelServiceInstance = new ModelServiceImpl(this.threadServiceInstance, markerServiceInstance);
-		let modeService = new MainThreadModeServiceImpl(this.threadServiceInstance, pluginService, modelServiceInstance);
-
-		let untitledEditorService = new UntitledEditorService();
-		this.themeService = new ThemeService(pluginService);
-
-		let result = createInstantiationService();
-		result.addSingleton(ITelemetryService, telemetryServiceInstance);
-		result.addSingleton(IEventService, eventServiceInstance);
-		result.addSingleton(IRequestService, requestServiceInstance);
-		result.addSingleton(IWorkspaceContextService, contextServiceInstance);
-		result.addSingleton(IContextViewService, this.contextViewServiceInstance);
-		result.addSingleton(IContextMenuService, new ContextMenuService(this.messageServiceInstance, telemetryServiceInstance));
-		result.addSingleton(IMessageService, this.messageServiceInstance);
-		result.addSingleton(IStorageService, this.storageServiceInstance);
-		result.addSingleton(ILifecycleService, lifecycleServiceInstance);
-		result.addSingleton(IThreadService, this.threadServiceInstance);
-		result.addSingleton(IPluginService, pluginService);
-		result.addSingleton(IModeService, modeService);
-		result.addSingleton(IFileService, fileServiceInstance);
-		result.addSingleton(IUntitledEditorService, untitledEditorService);
-		result.addSingleton(ISearchService, new SearchService(modelServiceInstance, untitledEditorService, contextServiceInstance, configServiceInstance));
-		result.addSingleton(IWindowService, this.windowServiceInstance);
-		result.addSingleton(IConfigurationService, configServiceInstance);
-		result.addSingleton(IKeybindingService, keybindingServiceInstance);
-		result.addSingleton(IMarkerService, markerServiceInstance);
-		result.addSingleton(IModelService, modelServiceInstance);
-		result.addSingleton(ICodeEditorService, new CodeEditorServiceImpl());
-		result.addSingleton(IThemeService, this.themeService);
-		result.addSingleton(IActionsService, new ActionsService(pluginService, keybindingServiceInstance));
-
-
-		return result;
+		if ((platform.isLinux || platform.isMacintosh) && process.getuid() === 0) {
+			this.messageService.show(Severity.Warning, nls.localize('runningAsRoot', "It is recommended not to run Code as 'root'."));
+		}
 	}
 
-	// TODO@Alex, TODO@Joh move this out of here?
-	private initPluginSystem(): void {
-		this.threadServiceInstance.getRemotable(MainProcessVSCodeAPIHelper);
-		this.threadServiceInstance.getRemotable(MainThreadDocuments);
-		this.threadServiceInstance.getRemotable(RemoteTelemetryServiceHelper);
-		this.workbench.getInstantiationService().createInstance(MainProcessTextMateSyntax);
-		this.workbench.getInstantiationService().createInstance(MainProcessTextMateSnippet);
-		this.workbench.getInstantiationService().createInstance(LanguageConfigurationFileHandler);
-		this.threadServiceInstance.getRemotable(MainThreadConfiguration);
-		this.threadServiceInstance.getRemotable(MainThreadQuickOpen);
-		this.threadServiceInstance.getRemotable(MainThreadStatusBar);
-		this.workbench.getInstantiationService().createInstance(MainThreadFileSystemEventService);
-		this.threadServiceInstance.getRemotable(MainThreadCommands);
-		this.threadServiceInstance.getRemotable(MainThreadOutputService);
-		this.threadServiceInstance.getRemotable(MainThreadDiagnostics);
-		this.threadServiceInstance.getRemotable(MainThreadMessageService);
-		this.threadServiceInstance.getRemotable(MainThreadLanguages);
-		this.threadServiceInstance.getRemotable(MainThreadWorkspace);
-		this.threadServiceInstance.getRemotable(MainThreadEditors);
-		this.threadServiceInstance.getRemotable(MainThreadStorage);
-		LanguageFeatures.createMainThreadInstances(this.threadServiceInstance);
+	private initServiceCollection(): [InstantiationService, ServiceCollection] {
+		const sharedProcess = connect(process.env['VSCODE_SHARED_IPC_HOOK']);
+		sharedProcess.done(service => {
+			service.onClose(() => {
+				this.messageService.show(Severity.Error, {
+					message: nls.localize('sharedProcessCrashed', "The shared process terminated unexpectedly. Please reload the window to recover."),
+					actions: [instantiationService.createInstance(ReloadWindowAction, ReloadWindowAction.ID, ReloadWindowAction.LABEL)]
+				});
+			});
+		}, errors.onUnexpectedError);
+
+		const serviceCollection = new ServiceCollection();
+		serviceCollection.set(IEventService, this.eventService);
+		serviceCollection.set(IWorkspaceContextService, this.contextService);
+		serviceCollection.set(IConfigurationService, this.configurationService);
+
+		const instantiationService = new InstantiationService(serviceCollection, true);
+		const disposables = new Disposables();
+
+		this.windowService = instantiationService.createInstance(WindowService);
+		serviceCollection.set(IWindowService, this.windowService);
+
+		// Storage
+		let disableWorkspaceStorage = this.configuration.env.extensionTestsPath || (!this.workspace && !this.configuration.env.extensionDevelopmentPath); // without workspace or in any extension test, we use inMemory storage unless we develop an extension where we want to preserve state
+		this.storageService = instantiationService.createInstance(Storage, window.localStorage, disableWorkspaceStorage ? inMemoryLocalStorageInstance : window.localStorage);
+		serviceCollection.set(IStorageService, this.storageService);
+
+		// Telemetry
+		if (this.configuration.env.isBuilt && !this.configuration.env.extensionDevelopmentPath && !!this.configuration.env.enableTelemetry) {
+			const channel = getDelayedChannel<ITelemetryAppenderChannel>(sharedProcess.then(c => c.getChannel('telemetryAppender')));
+			const commit = this.contextService.getConfiguration().env.commitHash;
+			const version = this.contextService.getConfiguration().env.version;
+
+			const config: ITelemetryServiceConfig = {
+				appender: new TelemetryAppenderClient(channel),
+				commonProperties: resolveWorkbenchCommonProperties(this.storageService, commit, version),
+				piiPaths: [this.configuration.env.appRoot, this.configuration.env.userExtensionsHome]
+			};
+
+			const telemetryService = instantiationService.createInstance(TelemetryService, config);
+			this.telemetryService = telemetryService;
+
+			const errorTelemetry = new ErrorTelemetry(telemetryService);
+			const idleMonitor = new IdleMonitor(2 * 60 * 1000); // 2 minutes
+
+			const listener = idleMonitor.onStatusChange(status =>
+				this.telemetryService.publicLog(status === UserStatus.Active
+					? TelemetryService.IDLE_STOP_EVENT_NAME
+					: TelemetryService.IDLE_START_EVENT_NAME
+				));
+
+			disposables.add(telemetryService, errorTelemetry, listener, idleMonitor);
+		} else {
+			this.telemetryService = NullTelemetryService;
+		}
+
+		serviceCollection.set(ITelemetryService, this.telemetryService);
+
+		this.messageService = instantiationService.createInstance(MessageService);
+		serviceCollection.set(IMessageService, this.messageService);
+
+		let fileService = disposables.add(instantiationService.createInstance(FileService));
+		serviceCollection.set(IFileService, fileService);
+
+		let lifecycleService = instantiationService.createInstance(LifecycleService);
+		this.toUnbind.push(lifecycleService.onShutdown(() => disposables.dispose()));
+		serviceCollection.set(ILifecycleService, lifecycleService);
+
+		this.threadService = instantiationService.createInstance(MainThreadService);
+		serviceCollection.set(IThreadService, this.threadService);
+
+		let extensionService = instantiationService.createInstance(MainProcessExtensionService);
+		serviceCollection.set(IExtensionService, extensionService);
+
+		this.contextViewService = instantiationService.createInstance(ContextViewService, this.container);
+		serviceCollection.set(IContextViewService, this.contextViewService);
+
+		let requestService = disposables.add(instantiationService.createInstance(RequestService));
+		serviceCollection.set(IRequestService, requestService);
+
+		let markerService = instantiationService.createInstance(MarkerService);
+		serviceCollection.set(IMarkerService, markerService);
+
+		let modeService = instantiationService.createInstance(MainThreadModeServiceImpl);
+		serviceCollection.set(IModeService, modeService);
+
+		let modelService = instantiationService.createInstance(ModelServiceImpl);
+		serviceCollection.set(IModelService, modelService);
+
+		let compatWorkerService = instantiationService.createInstance(MainThreadCompatWorkerService);
+		serviceCollection.set(ICompatWorkerService, compatWorkerService);
+
+		let editorWorkerService = instantiationService.createInstance(EditorWorkerServiceImpl);
+		serviceCollection.set(IEditorWorkerService, editorWorkerService);
+
+		let untitledEditorService = instantiationService.createInstance(UntitledEditorService);
+		serviceCollection.set(IUntitledEditorService, untitledEditorService);
+
+		this.themeService = instantiationService.createInstance(ThemeService);
+		serviceCollection.set(IThemeService, this.themeService);
+
+		let searchService = instantiationService.createInstance(SearchService);
+		serviceCollection.set(ISearchService, searchService);
+
+		let codeEditorService = instantiationService.createInstance(CodeEditorServiceImpl);
+		serviceCollection.set(ICodeEditorService, codeEditorService);
+
+		const extensionManagementChannel = getDelayedChannel<IExtensionManagementChannel>(sharedProcess.then(c => c.getChannel('extensions')));
+		const extensionManagementChannelClient = instantiationService.createInstance(ExtensionManagementChannelClient, extensionManagementChannel);
+		serviceCollection.set(IExtensionManagementService, extensionManagementChannelClient);
+
+		return [instantiationService, serviceCollection];
 	}
 
 	public open(): void {
@@ -366,52 +337,9 @@ export class WorkbenchShell {
 		this.registerListeners();
 
 		// Enable theme support
-		let themeId = this.storageServiceInstance.get(Preferences.THEME, StorageScope.GLOBAL, null);
-		if (!themeId) {
-			themeId = themes.toId(themes.BaseTheme.VS_DARK);
-			this.storageServiceInstance.store(Preferences.THEME, themeId, StorageScope.GLOBAL);
-		}
-
-		this.setTheme(themeId, false);
-
-		this.toUnbind.push(this.storageServiceInstance.addListener(StorageEventType.STORAGE, (e: StorageEvent) => {
-			if (e.key === Preferences.THEME) {
-				this.setTheme(e.newValue);
-			}
-		}));
-	}
-
-	private setTheme(themeId: string, layout = true): void {
-		if (!themeId) {
-			return;
-		}
-		var applyTheme = () => {
-			if (this.currentTheme) {
-				$(this.container).removeClass(this.currentTheme);
-			}
-			this.currentTheme = themeId;
-			$(this.container).addClass(this.currentTheme);
-
-			if (layout) {
-				this.layout();
-			}
-		}
-
-		if (!themes.getSyntaxThemeId(themeId)) {
-			applyTheme();
-		} else {
-			this.themeService.getTheme(themeId).then(theme => {
-				if (theme) {
-					this.themeService.loadThemeCSS(themeId);
-					applyTheme();
-
-				}
-			}, error => {
-				errors.onUnexpectedError(error);
-			});
-		}
-
-
+		this.themeService.initialize(this.container).then(null, error => {
+			errors.onUnexpectedError(error);
+		});
 	}
 
 	private registerListeners(): void {
@@ -476,7 +404,7 @@ export class WorkbenchShell {
 			return;
 		}
 
-		let now = new Date().getTime();
+		let now = Date.now();
 		if (errorMsg === this.previousErrorValue && now - this.previousErrorTime <= 1000) {
 			return; // Return if error message identical to previous and shorter than 1 second
 		}
@@ -488,8 +416,8 @@ export class WorkbenchShell {
 		console.error(errorMsg);
 
 		// Show to user if friendly message provided
-		if (error.friendlyMessage && this.messageServiceInstance) {
-			this.messageServiceInstance.show(Severity.Error, error.friendlyMessage);
+		if (error && error.friendlyMessage && this.messageService) {
+			this.messageService.show(Severity.Error, error.friendlyMessage);
 		}
 	}
 
@@ -499,7 +427,7 @@ export class WorkbenchShell {
 		let contentsSize = new Dimension(clArea.width, clArea.height);
 		this.contentsContainer.size(contentsSize.width, contentsSize.height);
 
-		this.contextViewServiceInstance.layout();
+		this.contextViewService.layout();
 		this.workbench.layout();
 	}
 
@@ -507,25 +435,17 @@ export class WorkbenchShell {
 		return this.workbench.joinCreation();
 	}
 
-	public dispose(force?: boolean): void {
+	public dispose(): void {
 
 		// Workbench
 		if (this.workbench) {
-			let veto = this.workbench.shutdown(force);
-
-			// If Workbench vetos dispose, return early
-			if (veto) {
-				return;
-			}
+			this.workbench.dispose();
 		}
 
-		this.contextViewServiceInstance.dispose();
-		this.storageServiceInstance.dispose();
+		this.contextViewService.dispose();
 
 		// Listeners
-		while (this.toUnbind.length) {
-			this.toUnbind.pop()();
-		}
+		this.toUnbind = dispose(this.toUnbind);
 
 		// Container
 		$(this.container).empty();

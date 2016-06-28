@@ -6,8 +6,9 @@
 'use strict';
 
 import {TPromise} from 'vs/base/common/winjs.base';
+import {onUnexpectedError, illegalArgument} from 'vs/base/common/errors';
 import {IDisposable} from 'vs/base/common/lifecycle';
-import LanguageFeatureRegistry from 'vs/editor/common/modes/languageFeatureRegistry';
+import {CommonEditorRegistry} from 'vs/editor/common/editorCommonExtensions';
 import {IRange} from 'vs/editor/common/editorCommon';
 import URI from 'vs/base/common/uri';
 
@@ -24,15 +25,14 @@ export interface ITypeBearing {
 }
 
 export interface INavigateTypesSupport {
-	getNavigateToItems:(search: string)=>TPromise<ITypeBearing[]>;
+	getNavigateToItems: (search: string) => TPromise<ITypeBearing[]>;
 }
-
 
 export namespace NavigateTypesSupportRegistry {
 
 	const _supports: INavigateTypesSupport[] = [];
 
-	export function register(support:INavigateTypesSupport):IDisposable {
+	export function register(support: INavigateTypesSupport): IDisposable {
 
 		if (support) {
 			_supports.push(support);
@@ -48,14 +48,35 @@ export namespace NavigateTypesSupportRegistry {
 					}
 				}
 			}
-		}
+		};
 	}
 
-	// export function has(): boolean {
-	// 	return _supports.length > 0;
-	// }
-
-	export function getAll(): INavigateTypesSupport[] {
+	export function all(): INavigateTypesSupport[] {
 		return _supports.slice(0);
 	}
 }
+
+export function getNavigateToItems(query: string): TPromise<ITypeBearing[]> {
+
+	const promises = NavigateTypesSupportRegistry.all().map(support => {
+		return support.getNavigateToItems(query).then(value => value, onUnexpectedError);
+	});
+
+	return TPromise.join(promises).then(all => {
+		const result: ITypeBearing[] = [];
+		for (let bearings of all) {
+			if (Array.isArray(bearings)) {
+				result.push(...bearings);
+			}
+		}
+		return result;
+	});
+}
+
+CommonEditorRegistry.registerLanguageCommand('_executeWorkspaceSymbolProvider', function (accessor, args: { query: string; }) {
+	let {query} = args;
+	if (typeof query !== 'string') {
+		throw illegalArgument();
+	}
+	return getNavigateToItems(query);
+});

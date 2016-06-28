@@ -5,24 +5,30 @@
 
 'use strict';
 
+import {TPromise} from 'vs/base/common/winjs.base';
 import {IWorkbenchContribution} from 'vs/workbench/common/contributions';
-import {LocalFileChangeEvent, IWorkingFileModelChangeEvent, EventType as FileEventType, ITextFileService} from 'vs/workbench/parts/files/common/files';
+import {TextFileChangeEvent, EventType as FileEventType, ITextFileService, AutoSaveMode, VIEWLET_ID} from 'vs/workbench/parts/files/common/files';
 import {IFileService} from 'vs/platform/files/common/files';
-import {OpenResourcesAction} from 'vs/workbench/parts/files/browser/fileActions';
-import plat = require('vs/base/common/platform');
+import {platform, Platform} from 'vs/base/common/platform';
+import {DiffEditorInput, toDiffLabel} from 'vs/workbench/common/editor/diffEditorInput';
+import {asFileEditorInput, EditorInput} from 'vs/workbench/common/editor';
 import errors = require('vs/base/common/errors');
+import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
 import URI from 'vs/base/common/uri';
-import {EventType as WorkbenchEventType} from 'vs/workbench/browser/events';
-import {IUntitledEditorService} from 'vs/workbench/services/untitled/browser/untitledEditorService';
+import {Position} from 'vs/platform/editor/common/editor';
+import {IWindowService} from 'vs/workbench/services/window/electron-browser/windowService';
+import {EventType as WorkbenchEventType} from 'vs/workbench/common/events';
+import {IUntitledEditorService} from 'vs/workbench/services/untitled/common/untitledEditorService';
 import {IPartService} from 'vs/workbench/services/part/common/partService';
 import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
 import {IResourceInput} from 'vs/platform/editor/common/editor';
 import {IEventService} from 'vs/platform/event/common/event';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {ILifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
-
-import remote = require('remote');
-import ipc = require('ipc');
+import {IViewletService} from 'vs/workbench/services/viewlet/common/viewletService';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
+import {ipcRenderer as ipc} from 'electron';
+import {IEditorGroupService} from 'vs/workbench/services/group/common/groupService';
 
 export interface IPath {
 	filePath: string;
@@ -31,15 +37,16 @@ export interface IPath {
 }
 
 export interface IOpenFileRequest {
-	filesToOpen: IPath[];
-	filesToCreate: IPath[];
+	filesToOpen?: IPath[];
+	filesToCreate?: IPath[];
+	filesToDiff?: IPath[];
 }
 
 // This extension decorates the window as dirty when auto save is disabled and a file is dirty (mac only) and handles opening of files in the instance.
 export class FileTracker implements IWorkbenchContribution {
 	private activeOutOfWorkspaceWatchers: { [resource: string]: boolean; };
 	private isDocumentedEdited: boolean;
-	private toUnbind: { (): void; }[];
+	private toUnbind: IDisposable[];;
 
 	constructor(
 		@IWorkspaceContextService private contextService: IWorkspaceContextService,
@@ -47,74 +54,113 @@ export class FileTracker implements IWorkbenchContribution {
 		@IPartService private partService: IPartService,
 		@IFileService private fileService: IFileService,
 		@ITextFileService private textFileService: ITextFileService,
+		@IViewletService private viewletService: IViewletService,
+		@IWorkbenchEditorService private editorService: IWorkbenchEditorService,
+		@IEditorGroupService private editorGroupService: IEditorGroupService,
 		@IInstantiationService private instantiationService: IInstantiationService,
 		@IUntitledEditorService private untitledEditorService: IUntitledEditorService,
-		@ILifecycleService private lifecycleService: ILifecycleService
+		@ILifecycleService private lifecycleService: ILifecycleService,
+		@IWindowService private windowService: IWindowService
 	) {
 		this.toUnbind = [];
 		this.isDocumentedEdited = false;
 		this.activeOutOfWorkspaceWatchers = Object.create(null);
 
 		// Make sure to reset any previous state
-		if (plat.platform === plat.Platform.Mac) {
-			let win = remote.getCurrentWindow();
-			win.setDocumentEdited(false);
+		if (platform === Platform.Mac) {
+			ipc.send('vscode:setDocumentEdited', this.windowService.getWindowId(), false); // handled from browser process
 		}
 
 		this.registerListeners();
-
-		// Listen to out of workspace file changes
-		this.updateOutOfWorkspaceFileListeners({ added: this.textFileService.getWorkingFilesModel().getEntries() });
 	}
 
 	private registerListeners(): void {
 
 		// Local text file changes
-		this.toUnbind.push(this.eventService.addListener(WorkbenchEventType.UNTITLED_FILE_DELETED, () => this.onUntitledDeletedEvent()));
-		this.toUnbind.push(this.eventService.addListener(WorkbenchEventType.UNTITLED_FILE_DIRTY, () => this.onUntitledDirtyEvent()));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_DIRTY, (e: LocalFileChangeEvent) => this.onTextFileDirty(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_SAVED, (e: LocalFileChangeEvent) => this.onTextFileSaved(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_SAVE_ERROR, (e: LocalFileChangeEvent) => this.onTextFileSaveError(e)));
-		this.toUnbind.push(this.eventService.addListener(FileEventType.FILE_REVERTED, (e: LocalFileChangeEvent) => this.onTextFileReverted(e)));
-
-		// Working Files Model Change
-		this.textFileService.getWorkingFilesModel().onModelChange.add(this.onWorkingFilesModelChange, this);
-		this.toUnbind.push(() => this.textFileService.getWorkingFilesModel().onModelChange.remove(this.onWorkingFilesModelChange, this));
+		this.toUnbind.push(this.eventService.addListener2(WorkbenchEventType.UNTITLED_FILE_SAVED, () => this.onUntitledSavedEvent()));
+		this.toUnbind.push(this.eventService.addListener2(WorkbenchEventType.UNTITLED_FILE_DIRTY, () => this.onUntitledDirtyEvent()));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_DIRTY, (e: TextFileChangeEvent) => this.onTextFileDirty(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_SAVED, (e: TextFileChangeEvent) => this.onTextFileSaved(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_SAVE_ERROR, (e: TextFileChangeEvent) => this.onTextFileSaveError(e)));
+		this.toUnbind.push(this.eventService.addListener2(FileEventType.FILE_REVERTED, (e: TextFileChangeEvent) => this.onTextFileReverted(e)));
 
 		// Support openFiles event for existing and new files
-		ipc.on('vscode:openFiles', (request: IOpenFileRequest) => {
-			let inputs: IResourceInput[] = [];
-			if (request.filesToOpen) {
-				inputs.push(...this.toInputs(request.filesToOpen, false));
+		ipc.on('vscode:openFiles', (event, request: IOpenFileRequest) => this.onOpenFiles(request));
+
+		// Editor input changes
+		this.toUnbind.push(this.editorGroupService.onEditorsChanged(() => this.onEditorsChanged()));
+
+		// Lifecycle
+		this.lifecycleService.onShutdown(this.dispose, this);
+	}
+
+	private onOpenFiles(request: IOpenFileRequest): void {
+		let inputs: IResourceInput[] = [];
+		let diffMode = (request.filesToDiff.length === 2);
+
+		if (!diffMode && request.filesToOpen) {
+			inputs.push(...this.toInputs(request.filesToOpen, false));
+		}
+
+		if (!diffMode && request.filesToCreate) {
+			inputs.push(...this.toInputs(request.filesToCreate, true));
+		}
+
+		if (diffMode) {
+			inputs.push(...this.toInputs(request.filesToDiff, false));
+		}
+
+		if (inputs.length) {
+			this.openResources(inputs, diffMode).done(null, errors.onUnexpectedError);
+		}
+	}
+
+	private openResources(resources: IResourceInput[], diffMode: boolean): TPromise<any> {
+		return this.partService.joinCreation().then(() => {
+			let viewletPromise = TPromise.as(null);
+			if (!this.partService.isSideBarHidden()) {
+				viewletPromise = this.viewletService.openViewlet(VIEWLET_ID, false);
 			}
 
-			if (request.filesToCreate) {
-				inputs.push(...this.toInputs(request.filesToCreate, true));
-			}
+			return viewletPromise.then(() => {
 
-			if (inputs.length) {
-				let action = this.instantiationService.createInstance(OpenResourcesAction, inputs);
+				// In diffMode we open 2 resources as diff
+				if (diffMode) {
+					return TPromise.join(resources.map(f => this.editorService.createInput(f))).then((inputs: EditorInput[]) => {
+						return this.editorService.openEditor(new DiffEditorInput(toDiffLabel(resources[0].resource, resources[1].resource, this.contextService), null, inputs[0], inputs[1]));
+					});
+				}
 
-				action.run().done(null, errors.onUnexpectedError);
-				action.dispose();
-			}
+				// For one file, just put it into the current active editor
+				if (resources.length === 1) {
+					return this.editorService.openEditor(resources[0]);
+				}
+
+				// Otherwise open all
+				const activeEditor = this.editorService.getActiveEditor();
+				return this.editorService.openEditors(resources.map((r, index) => {
+					return {
+						input: r,
+						position: activeEditor ? activeEditor.position : Position.LEFT
+					};
+				}));
+			});
 		});
-
-		this.lifecycleService.onShutdown.add(this.dispose, this);
 	}
 
 	private toInputs(paths: IPath[], isNew: boolean): IResourceInput[] {
 		return paths.map(p => {
 			let input = <IResourceInput>{
-				resource: isNew ? this.untitledEditorService.createOrGet(URI.file(p.filePath)).getResource() : URI.file(p.filePath)
+				resource: isNew ? this.untitledEditorService.createOrGet(URI.file(p.filePath)).getResource() : URI.file(p.filePath),
+				options: {
+					pinned: true
+				}
 			};
 
 			if (!isNew && p.lineNumber) {
-				input.options = {
-					selection: {
-						startLineNumber: p.lineNumber,
-						startColumn: p.columnNumber
-					}
+				input.options.selection = {
+					startLineNumber: p.lineNumber,
+					startColumn: p.columnNumber
 				};
 			}
 
@@ -122,29 +168,30 @@ export class FileTracker implements IWorkbenchContribution {
 		});
 	}
 
-	private updateOutOfWorkspaceFileListeners(event: IWorkingFileModelChangeEvent): void {
-		let added = event.added ? event.added.map((e) => e.resource).filter((r) => r.scheme === 'file' && !this.contextService.isInsideWorkspace(r)) : [];
-		let removed = event.removed ? event.removed.map((e) => e.resource).filter((r) => r.scheme === 'file' && !this.contextService.isInsideWorkspace(r)) : [];
+	private onEditorsChanged(): void {
+		let visibleOutOfWorkspaceResources = this.editorService.getVisibleEditors().map((editor) => {
+			return asFileEditorInput(editor.input, true);
+		}).filter((input) => {
+			return !!input && !this.contextService.isInsideWorkspace(input.getResource());
+		}).map((input) => {
+			return input.getResource().toString();
+		});
 
-		// Handle added
-		added.forEach((resource) => {
-			if (!this.activeOutOfWorkspaceWatchers[resource.toString()]) {
-				this.fileService.watchFileChanges(resource);
-				this.activeOutOfWorkspaceWatchers[resource.toString()] = true;
+		// Handle no longer visible out of workspace resources
+		Object.keys(this.activeOutOfWorkspaceWatchers).forEach((watchedResource) => {
+			if (visibleOutOfWorkspaceResources.indexOf(watchedResource) < 0) {
+				this.fileService.unwatchFileChanges(watchedResource);
+				delete this.activeOutOfWorkspaceWatchers[watchedResource];
 			}
 		});
 
-		// Handle removed
-		removed.forEach((resource) => {
-			if (this.activeOutOfWorkspaceWatchers[resource.toString()]) {
-				this.fileService.unwatchFileChanges(resource);
-				delete this.activeOutOfWorkspaceWatchers[resource.toString()];
+		// Handle newly visible out of workspace resources
+		visibleOutOfWorkspaceResources.forEach((resourceToWatch) => {
+			if (!this.activeOutOfWorkspaceWatchers[resourceToWatch]) {
+				this.fileService.watchFileChanges(URI.parse(resourceToWatch));
+				this.activeOutOfWorkspaceWatchers[resourceToWatch] = true;
 			}
 		});
-	}
-
-	private onWorkingFilesModelChange(event: IWorkingFileModelChangeEvent): void {
-		this.updateOutOfWorkspaceFileListeners(event);
 	}
 
 	private onUntitledDirtyEvent(): void {
@@ -153,46 +200,42 @@ export class FileTracker implements IWorkbenchContribution {
 		}
 	}
 
-	private onUntitledDeletedEvent(): void {
+	private onUntitledSavedEvent(): void {
 		if (this.isDocumentedEdited) {
 			this.updateDocumentEdited();
 		}
 	}
 
-	private onTextFileDirty(e: LocalFileChangeEvent): void {
-		if (!this.contextService.isAutoSaveEnabled() && !this.isDocumentedEdited) {
-			this.updateDocumentEdited(); // no indication needed when auto save is turned off and we didnt show dirty
+	private onTextFileDirty(e: TextFileChangeEvent): void {
+		if ((this.textFileService.getAutoSaveMode() !== AutoSaveMode.AFTER_SHORT_DELAY) && !this.isDocumentedEdited) {
+			this.updateDocumentEdited(); // no indication needed when auto save is enabled for short delay
 		}
 	}
 
-	private onTextFileSaved(e: LocalFileChangeEvent): void {
+	private onTextFileSaved(e: TextFileChangeEvent): void {
 		if (this.isDocumentedEdited) {
 			this.updateDocumentEdited();
 		}
 	}
 
-	private onTextFileSaveError(e: LocalFileChangeEvent): void {
+	private onTextFileSaveError(e: TextFileChangeEvent): void {
 		if (!this.isDocumentedEdited) {
 			this.updateDocumentEdited();
 		}
 	}
 
-	private onTextFileReverted(e: LocalFileChangeEvent): void {
+	private onTextFileReverted(e: TextFileChangeEvent): void {
 		if (this.isDocumentedEdited) {
 			this.updateDocumentEdited();
 		}
 	}
 
 	private updateDocumentEdited(): void {
-		if (plat.platform === plat.Platform.Mac) {
-			let win = remote.getCurrentWindow();
-			let isDirtyIndicated = win.isDocumentEdited();
+		if (platform === Platform.Mac) {
 			let hasDirtyFiles = this.textFileService.isDirty();
 			this.isDocumentedEdited = hasDirtyFiles;
 
-			if (hasDirtyFiles !== isDirtyIndicated) {
-				win.setDocumentEdited(hasDirtyFiles);
-			}
+			ipc.send('vscode:setDocumentEdited', this.windowService.getWindowId(), hasDirtyFiles); // handled from browser process
 		}
 	}
 
@@ -201,9 +244,7 @@ export class FileTracker implements IWorkbenchContribution {
 	}
 
 	public dispose(): void {
-		while (this.toUnbind.length) {
-			this.toUnbind.pop()();
-		}
+		this.toUnbind = dispose(this.toUnbind);
 
 		// Dispose watchers if any
 		for (let key in this.activeOutOfWorkspaceWatchers) {

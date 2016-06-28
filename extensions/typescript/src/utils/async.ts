@@ -1,7 +1,8 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 'use strict';
 
 export interface ITask<T> {
@@ -11,7 +12,7 @@ export interface ITask<T> {
 export class Delayer<T> {
 
 	public defaultDelay: number;
-	private timeout: NodeJS.Timer;
+	private timeout: any; // Timer
 	private completionPromise: Promise<T>;
 	private onSuccess: (value?: T | Thenable<T>) => void;
 	private task: ITask<T>;
@@ -32,7 +33,7 @@ export class Delayer<T> {
 
 		if (!this.completionPromise) {
 			this.completionPromise = new Promise<T>((resolve) => {
-				this.onSuccess = resolve
+				this.onSuccess = resolve;
 			}).then(() => {
 				this.completionPromise = null;
 				this.onSuccess = null;

@@ -5,32 +5,35 @@
 'use strict';
 
 import 'vs/css!vs/base/browser/ui/progressbar/progressbar';
-import nls = require('vs/nls');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
+import * as nls from 'vs/nls';
+import URI from 'vs/base/common/uri';
 import {TPromise} from 'vs/base/common/winjs.base';
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import HoverOperation = require('./hoverOperation');
-import HoverWidget = require('./hoverWidgets');
-import HtmlContent = require('vs/base/common/htmlContent');
-import {renderHtml} from 'vs/base/browser/htmlContentRenderer';
-import {tokenizeToHtmlContent} from 'vs/editor/common/modes/textToHtmlTokenizer';
-import ExtraInfoRegistry from '../common/hover';
+import {renderMarkedString} from 'vs/base/browser/htmlContentRenderer';
+import {IOpenerService, NullOpenerService} from 'vs/platform/opener/common/opener';
+import {IModeService} from 'vs/editor/common/services/modeService';
 import {Range} from 'vs/editor/common/core/range';
+import {Position} from 'vs/editor/common/core/position';
+import {IRange} from 'vs/editor/common/editorCommon';
+import {HoverProviderRegistry, Hover} from 'vs/editor/common/modes';
+import {tokenizeToString} from 'vs/editor/common/modes/textToHtmlTokenizer';
+import {ICodeEditor} from 'vs/editor/browser/editorBrowser';
+import {getHover} from '../common/hover';
+import {HoverOperation, IHoverComputer} from './hoverOperation';
+import {ContentHoverWidget} from './hoverWidgets';
+import {textToMarkedString, MarkedString} from 'vs/base/common/htmlContent';
 
+class ModesContentComputer implements IHoverComputer<Hover[]> {
 
-class ModesContentComputer implements HoverOperation.IHoverComputer<Modes.IComputeExtraInfoResult[]> {
+	private _editor: ICodeEditor;
+	private _result: Hover[];
+	private _range: Range;
 
-	private _editor: EditorBrowser.ICodeEditor;
-	private _result: Modes.IComputeExtraInfoResult[];
-	private _range: EditorCommon.IEditorRange;
-
-	constructor(editor: EditorBrowser.ICodeEditor) {
+	constructor(editor: ICodeEditor) {
 		this._editor = editor;
 		this._range = null;
 	}
 
-	public setRange(range: EditorCommon.IEditorRange): void {
+	public setRange(range: Range): void {
 		this._range = range;
 		this._result = [];
 	}
@@ -39,38 +42,21 @@ class ModesContentComputer implements HoverOperation.IHoverComputer<Modes.ICompu
 		this._result = [];
 	}
 
-	public computeAsync(): TPromise<Modes.IComputeExtraInfoResult[]> {
+	public computeAsync(): TPromise<Hover[]> {
 
 		let model = this._editor.getModel();
-		if (!ExtraInfoRegistry.has(model)) {
+		if (!HoverProviderRegistry.has(model)) {
 			return TPromise.as(null);
 		}
 
-		let supports = ExtraInfoRegistry.all(model);
-		let values: Modes.IComputeExtraInfoResult[] = [];
-		let promises: TPromise<any>[] = [];
-
-		for (let support of supports) {
-			promises.push(support.computeInfo(this._editor.getModel().getAssociatedResource(), {
-				lineNumber: this._range.startLineNumber,
-				column: this._range.startColumn,
-			}).then((result: Modes.IComputeExtraInfoResult) => {
-				if (result) {
-					let hasRange = (typeof result.range !== 'undefined');
-					let hasValue = (typeof result.value !== 'undefined');
-					let hasHtmlContent = (typeof result.htmlContent !== 'undefined' && result.htmlContent && result.htmlContent.length > 0);
-					if (hasRange && (hasValue || hasHtmlContent)) {
-						values.push(result);
-					}
-				}
-			}));
-		}
-
-		return TPromise.join(promises).then(() => values);
+		return getHover(model, new Position(
+			this._range.startLineNumber,
+			this._range.startColumn
+		));
 	}
 
-	public computeSync(): Modes.IComputeExtraInfoResult[] {
-		var result:Modes.IComputeExtraInfoResult[] = [];
+	public computeSync(): Hover[] {
+		var result:Hover[] = [];
 		var lineNumber = this._range.startLineNumber;
 
 		if (lineNumber > this._editor.getModel().getLineCount()) {
@@ -78,19 +64,27 @@ class ModesContentComputer implements HoverOperation.IHoverComputer<Modes.ICompu
 			return result;
 		}
 
+		var hasHoverContent = (contents: MarkedString | MarkedString[]) => {
+			return contents && (!Array.isArray(contents) || (<MarkedString[]> contents).length > 0);
+		};
+
 		var lineDecorations = this._editor.getLineDecorations(lineNumber);
 		var maxColumn = this._editor.getModel().getLineMaxColumn(lineNumber);
 		lineDecorations.forEach((d) => {
 			var startColumn = (d.range.startLineNumber === lineNumber) ? d.range.startColumn : 1;
 			var endColumn = (d.range.endLineNumber === lineNumber) ? d.range.endColumn : maxColumn;
 
-			if (startColumn <= this._range.startColumn && this._range.endColumn <= endColumn && (d.options.hoverMessage || (d.options.htmlMessage && d.options.htmlMessage.length > 0))) {
-				var obj:Modes.IComputeExtraInfoResult = {
-					value: d.options.hoverMessage,
+			if (startColumn <= this._range.startColumn && this._range.endColumn <= endColumn && hasHoverContent(d.options.hoverMessage)) {
+				var obj:Hover = {
+					contents: [],
 					range: new Range(this._range.startLineNumber, startColumn, this._range.startLineNumber, endColumn)
 				};
-				if(d.options.htmlMessage) {
-					obj.htmlContent = d.options.htmlMessage;
+				if (d.options.hoverMessage) {
+					if (Array.isArray(d.options.hoverMessage)) {
+						obj.contents = obj.contents.concat(<MarkedString[]> d.options.hoverMessage);
+					} else {
+						obj.contents.push(<MarkedString> d.options.hoverMessage);
+					}
 				}
 				result.push(obj);
 			}
@@ -98,7 +92,7 @@ class ModesContentComputer implements HoverOperation.IHoverComputer<Modes.ICompu
 		return result;
 	}
 
-	public onResult(result: Modes.IComputeExtraInfoResult[], isFromSynchronousComputation: boolean): void {
+	public onResult(result: Hover[], isFromSynchronousComputation: boolean): void {
 		// Always put synchronous messages before asynchronous ones
 		if (isFromSynchronousComputation) {
 			this._result = result.concat(this._result);
@@ -107,51 +101,55 @@ class ModesContentComputer implements HoverOperation.IHoverComputer<Modes.ICompu
 		}
 	}
 
-	public getResult(): Modes.IComputeExtraInfoResult[] {
+	public getResult(): Hover[] {
 		return this._result.slice(0);
 	}
 
-	public getResultWithLoadingMessage(): Modes.IComputeExtraInfoResult[] {
+	public getResultWithLoadingMessage(): Hover[] {
 		return this._result.slice(0).concat([this._getLoadingMessage()]);
 	}
 
-	private _getLoadingMessage(): Modes.IComputeExtraInfoResult {
+	private _getLoadingMessage(): Hover {
 		return {
 			range: this._range,
-			htmlContent: [{
-				tagName: 'div',
-				className: '',
-				children: [{
-					text: nls.localize('modesContentHover.loading', "Loading...")
-				}]
-			}]
+			contents: [textToMarkedString(nls.localize('modesContentHover.loading', "Loading..."))]
 		};
 	}
 }
 
-export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
+export class ModesContentHoverWidget extends ContentHoverWidget {
 
 	static ID = 'editor.contrib.modesContentHoverWidget';
-	private _messages: Modes.IComputeExtraInfoResult[];
-	private _lastRange: EditorCommon.IEditorRange;
+	private _messages: Hover[];
+	private _lastRange: Range;
 	private _computer: ModesContentComputer;
-	private _hoverOperation: HoverOperation.HoverOperation<Modes.IComputeExtraInfoResult[]>;
+	private _hoverOperation: HoverOperation<Hover[]>;
 	private _highlightDecorations:string[];
 	private _isChangingDecorations: boolean;
+	private _openerService: IOpenerService;
+	private _modeService: IModeService;
+	private _shouldFocus: boolean;
 
-	constructor(editor: EditorBrowser.ICodeEditor) {
+	constructor(editor: ICodeEditor, openerService: IOpenerService, modeService: IModeService) {
 		super(ModesContentHoverWidget.ID, editor);
 
 		this._computer = new ModesContentComputer(this._editor);
 		this._highlightDecorations = [];
 		this._isChangingDecorations = false;
+		this._openerService = openerService || NullOpenerService;
+		this._modeService = modeService;
 
-		this._hoverOperation = new HoverOperation.HoverOperation(
+		this._hoverOperation = new HoverOperation(
 			this._computer,
-			(result:Modes.IComputeExtraInfoResult[]) => this._withResult(result, true),
+			(result:Hover[]) => this._withResult(result, true),
 			null,
 			(result:any) => this._withResult(result, false)
 		);
+	}
+
+	public dispose(): void {
+		this._hoverOperation.cancel();
+		super.dispose();
 	}
 
 	public onModelDecorationsChanged(): void {
@@ -167,7 +165,7 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 		}
 	}
 
-	public startShowingAt(range: EditorCommon.IEditorRange): void {
+	public startShowingAt(range: Range, focus: boolean): void {
 		if (this._lastRange) {
 			if (this._lastRange.equalsRange(range)) {
 				// We have to show the widget at the exact same range as before, so no work is needed
@@ -184,7 +182,7 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 			if (this._showAtPosition.lineNumber !== range.startLineNumber) {
 				this.hide();
 			} else {
-				var filteredMessages: Modes.IComputeExtraInfoResult[] = [];
+				var filteredMessages: Hover[] = [];
 				for (var i = 0, len = this._messages.length; i < len; i++) {
 					var msg = this._messages[i];
 					var rng = msg.range;
@@ -202,6 +200,7 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 
 		this._lastRange = range;
 		this._computer.setRange(range);
+		this._shouldFocus = focus;
 		this._hoverOperation.start();
 	}
 
@@ -214,18 +213,17 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 		this._isChangingDecorations = false;
 	}
 
-	public _withResult(result: Modes.IComputeExtraInfoResult[], complete:boolean): void {
+	public _withResult(result: Hover[], complete:boolean): void {
 		this._messages = result;
 
-		if (this._messages.length > 0) {
+		if (this._lastRange && this._messages.length > 0) {
 			this._renderMessages(this._lastRange, this._messages);
 		} else if(complete) {
 			this.hide();
 		}
 	}
 
-	// TODO@Alex: pull this out into a common utility class
-	private _renderMessages(renderRange: EditorCommon.IRange, messages: Modes.IComputeExtraInfoResult[]): void {
+	private _renderMessages(renderRange: IRange, messages: Hover[]): void {
 
 		// update column from which to show
 		var renderColumn = Number.MAX_VALUE,
@@ -241,29 +239,25 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 			highlightRange = Range.plusRange(highlightRange, msg.range);
 
 			var row:HTMLElement = document.createElement('div');
-			var span:HTMLElement = null;
 			var container = row;
 
-			if (msg.className) {
-				span = document.createElement('span');
-				span.className = msg.className;
-				container = span;
-				row.appendChild(span);
-			}
+			if (msg.contents && msg.contents.length > 0) {
+				container.appendChild(renderMarkedString(msg.contents, {
+					actionCallback: (content) => {
+						this._openerService.open(URI.parse(content));
+					},
+					codeBlockRenderer: (modeId, value): string | TPromise<string> => {
 
-			if(msg.htmlContent && msg.htmlContent.length > 0) {
-				msg.htmlContent.forEach((content) => {
-					container.appendChild(renderHtml(content, undefined, (modeId, value) => {
-						let mode: Modes.IMode;
-						let model = this._editor.getModel();
-						if (!model.isDisposed()) {
-							mode = model.getMode();
+						let mode = this._modeService.getMode(modeId);
+						if (mode) {
+							return tokenizeToString(value, mode);
 						}
-						return tokenizeToHtmlContent(value, model.getMode());
-					}));
-				});
-			} else {
-				container.textContent = msg.value;
+
+						return this._modeService.getOrCreateMode(modeId).then(
+							mode => tokenizeToString(value, mode),
+							err => tokenizeToString(value, null));
+					}
+				}));
 			}
 
 			fragment.appendChild(row);
@@ -276,7 +270,7 @@ export class ModesContentHoverWidget extends HoverWidget.ContentHoverWidget {
 		this.showAt({
 			lineNumber: renderRange.startLineNumber,
 			column: renderColumn
-		});
+		}, this._shouldFocus);
 
 		this._isChangingDecorations = true;
 		this._highlightDecorations = this._editor.deltaDecorations(this._highlightDecorations, [{

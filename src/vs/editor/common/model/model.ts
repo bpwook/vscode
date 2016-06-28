@@ -4,21 +4,20 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
+import URI from 'vs/base/common/uri';
 import {TPromise} from 'vs/base/common/winjs.base';
-import {IMode} from 'vs/editor/common/modes';
-import {TextModel} from 'vs/editor/common/model/textModel';
+import {
+	EventType, IModel, ITextModelCreationOptions, IModeSupportChangedEvent, IModelDecorationsChangedEvent,
+	IModelOptionsChangedEvent, IModelModeChangedEvent, IRawText
+} from 'vs/editor/common/editorCommon';
 import {EditableTextModel} from 'vs/editor/common/model/editableTextModel';
-import EditorCommon = require('vs/editor/common/editorCommon');
-import {URL} from 'vs/base/common/network';
-import Objects = require('vs/base/common/objects');
+import {TextModel} from 'vs/editor/common/model/textModel';
+import {IMode} from 'vs/editor/common/modes';
 import {IDisposable} from 'vs/base/common/lifecycle';
+import {BulkListenerCallback} from 'vs/base/common/eventEmitter';
 
 // The hierarchy is:
 // Model -> EditableTextModel -> TextModelWithDecorations -> TextModelWithTrackedRanges -> TextModelWithMarkers -> TextModelWithTokens -> TextModel
-
-interface IPropertiesMap {
-	[key:string]:any;
-}
 
 var MODEL_ID = 0;
 
@@ -35,12 +34,36 @@ var aliveModels:{[modelId:string]:boolean;} = {};
 // 	LAST_CNT = cnt;
 // }, 100);
 
-export class Model extends EditableTextModel implements EditorCommon.IModel {
+export class Model extends EditableTextModel implements IModel {
+
+	public onDidChangeModeSupport(listener: (e:IModeSupportChangedEvent)=>void): IDisposable {
+		return this.addListener2(EventType.ModelModeSupportChanged, listener);
+	}
+	public onDidChangeDecorations(listener: (e:IModelDecorationsChangedEvent)=>void): IDisposable {
+		return this.addListener2(EventType.ModelDecorationsChanged, listener);
+	}
+	public onDidChangeOptions(listener: (e:IModelOptionsChangedEvent)=>void): IDisposable {
+		return this.addListener2(EventType.ModelOptionsChanged, listener);
+	}
+	public onWillDispose(listener: ()=>void): IDisposable {
+		return this.addListener2(EventType.ModelDispose, listener);
+	}
+	public onDidChangeMode(listener: (e:IModelModeChangedEvent)=>void): IDisposable {
+		return this.addListener2(EventType.ModelModeChanged, listener);
+	}
+
+	public addBulkListener(listener:BulkListenerCallback):IDisposable {
+		return super.addBulkListener(listener);
+	}
+
+	public static createFromString(text:string, options:ITextModelCreationOptions = TextModel.DEFAULT_CREATION_OPTIONS, mode:IMode|TPromise<IMode> = null, uri:URI = null): Model {
+		let rawText = TextModel.toRawText(text, options);
+		return new Model(rawText, mode, uri);
+	}
 
 	public id:string;
 
-	private _associatedResource:URL;
-	private _extraProperties:IPropertiesMap;
+	private _associatedResource:URI;
 	private _attachedEditorCount:number;
 
 	/**
@@ -56,35 +79,30 @@ export class Model extends EditableTextModel implements EditorCommon.IModel {
 	 *   The resource associated with this model. If the value is not provided an
 	 *   unique in memory URL is constructed as the associated resource.
 	 */
-	constructor(rawText:string, modeOrPromise:IMode|TPromise<IMode>, associatedResource:URL=null) {
+	constructor(rawText:IRawText, modeOrPromise:IMode|TPromise<IMode>, associatedResource:URI=null) {
 		super([
-			EditorCommon.EventType.ModelPropertiesChanged,
-			EditorCommon.EventType.ModelDispose
-		], TextModel.toRawText(rawText), modeOrPromise);
+			EventType.ModelDispose
+		], rawText, modeOrPromise);
 
 		// Generate a new unique model id
 		MODEL_ID++;
 		this.id = '$model' + MODEL_ID;
 
 		if (typeof associatedResource === 'undefined' || associatedResource === null) {
-			associatedResource = new URL('inmemory://model/' + MODEL_ID);
+			this._associatedResource = URI.parse('inmemory://model/' + MODEL_ID);
+		} else {
+			this._associatedResource = associatedResource;
 		}
 
-		this._associatedResource = associatedResource;
 
 		if (aliveModels[String(this._associatedResource)]) {
 			throw new Error('Cannot instantiate a second Model with the same URI!');
 		}
 
-		this._extraProperties = {};
 		this._attachedEditorCount = 0;
 
 		aliveModels[String(this._associatedResource)] = true;
 		// console.log('ALIVE MODELS: ' + Object.keys(aliveModels).join('\n'));
-	}
-
-	public getURL(): URL {
-		return this._associatedResource;
 	}
 
 	public getModeId(): string {
@@ -98,17 +116,13 @@ export class Model extends EditableTextModel implements EditorCommon.IModel {
 	public dispose(): void {
 		this._isDisposing = true;
 		delete aliveModels[String(this._associatedResource)];
-		this.emit(EditorCommon.EventType.ModelDispose);
+		this.emit(EventType.ModelDispose);
 		super.dispose();
 		this._isDisposing = false;
 		// console.log('ALIVE MODELS: ' + Object.keys(aliveModels).join('\n'));
 	}
 
 	public onBeforeAttached(): void {
-		if (this._isDisposed) {
-			throw new Error('Model.onBeforeAttached: Model is disposed');
-		}
-
 		this._attachedEditorCount++;
 
 		// Warm up tokens for the editor
@@ -116,10 +130,6 @@ export class Model extends EditableTextModel implements EditorCommon.IModel {
 	}
 
 	public onBeforeDetached(): void {
-		if (this._isDisposed) {
-			throw new Error('Model.onBeforeDetached: Model is disposed');
-		}
-
 		this._attachedEditorCount--;
 
 		// Intentional empty (for now)
@@ -129,45 +139,7 @@ export class Model extends EditableTextModel implements EditorCommon.IModel {
 		return this._attachedEditorCount > 0;
 	}
 
-	public getAssociatedResource(): URL {
-		if (this._isDisposed) {
-			throw new Error('Model.getAssociatedResource: Model is disposed');
-		}
-
+	public get uri(): URI {
 		return this._associatedResource;
-	}
-
-	public setProperty(name:string, value:any): void {
-		if (this._isDisposed) {
-			throw new Error('Model.setProperty: Model is disposed');
-		}
-
-		this._extraProperties[name] = value;
-		this.emitModelPropertiesChangedEvent();
-	}
-
-	public getProperty(name:string): any {
-		if (this._isDisposed) {
-			throw new Error('Model.getProperty: Model is disposed');
-		}
-
-		return this._extraProperties.hasOwnProperty(name) ? this._extraProperties[name] : null;
-	}
-
-	public getProperties(): {[name:string]:any;} {
-		if (this._isDisposed) {
-			throw new Error('Model.getProperties: Model is disposed');
-		}
-
-		return Objects.clone(this._extraProperties);
-	}
-
-	private emitModelPropertiesChangedEvent(): void {
-		var e:EditorCommon.IModelPropertiesChangedEvent = {
-			properties: this._extraProperties
-		};
-		if (!this._isDisposing) {
-			this.emit(EditorCommon.EventType.ModelPropertiesChanged, e);
-		}
 	}
 }

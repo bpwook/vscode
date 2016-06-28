@@ -4,43 +4,41 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import EditorCommon = require('vs/editor/common/editorCommon');
-import {ModelServiceImpl} from 'vs/editor/common/services/modelServiceImpl';
-import InstantiationService = require('vs/platform/instantiation/common/instantiationService');
-import mainThreadService = require('vs/platform/thread/common/mainThreadService');
-import MarkerService = require('vs/platform/markers/common/markerService');
-import Env = require('vs/base/common/flags');
+import {IDisposable} from 'vs/base/common/lifecycle';
 import URI from 'vs/base/common/uri';
-import MainTelemetryService = require('vs/platform/telemetry/browser/mainTelemetryService');
-import SimpleServices = require('vs/editor/browser/standalone/simpleServices');
-import Lifecycle = require('vs/base/common/lifecycle');
-import ContextViewService = require('vs/platform/contextview/browser/contextViewService');
-import ContextMenuService = require('vs/platform/contextview/browser/contextMenuService');
-import {BaseWorkspaceContextService} from 'vs/platform/workspace/common/baseWorkspaceContextService';
-import _eventService = require('vs/platform/event/common/eventService');
-import {CodeEditorServiceImpl} from 'vs/editor/browser/services/codeEditorServiceImpl';
-import {ICodeEditorService} from 'vs/editor/common/services/codeEditorService';
-import {IModelService} from 'vs/editor/common/services/modelService';
-import {IStorageService} from 'vs/platform/storage/common/storage';
 import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
-import {IContextViewService, IContextMenuService} from 'vs/platform/contextview/browser/contextView';
+import {ContextMenuService} from 'vs/platform/contextview/browser/contextMenuService';
+import {IContextMenuService, IContextViewService} from 'vs/platform/contextview/browser/contextView';
+import {ContextViewService} from 'vs/platform/contextview/browser/contextViewService';
 import {IEditorService} from 'vs/platform/editor/common/editor';
 import {IEventService} from 'vs/platform/event/common/event';
-import {IFileService} from 'vs/platform/files/common/files';
+import {EventService} from 'vs/platform/event/common/eventService';
+import {IExtensionService} from 'vs/platform/extensions/common/extensions';
 import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
+import {InstantiationService} from 'vs/platform/instantiation/common/instantiationService';
+import {ServiceCollection} from 'vs/platform/instantiation/common/serviceCollection';
+import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
+import {MarkerService} from 'vs/platform/markers/common/markerService';
 import {IMarkerService} from 'vs/platform/markers/common/markers';
 import {IMessageService} from 'vs/platform/message/common/message';
 import {IProgressService} from 'vs/platform/progress/common/progress';
-import {IRequestService} from 'vs/platform/request/common/request';
-import {ISearchService} from 'vs/platform/search/common/search';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {IThreadService} from 'vs/platform/thread/common/thread';
+import {IStorageService, NullStorageService} from 'vs/platform/storage/common/storage';
+import {ITelemetryService, NullTelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {BaseWorkspaceContextService} from 'vs/platform/workspace/common/baseWorkspaceContextService';
 import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
-import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
-import {IPluginService} from 'vs/platform/plugins/common/plugins';
-import {AbstractPluginService} from 'vs/platform/plugins/common/abstractPluginService';
+import {ICodeEditorService} from 'vs/editor/common/services/codeEditorService';
+import {IEditorWorkerService} from 'vs/editor/common/services/editorWorkerService';
+import {EditorWorkerServiceImpl} from 'vs/editor/common/services/editorWorkerServiceImpl';
 import {IModeService} from 'vs/editor/common/services/modeService';
 import {MainThreadModeServiceImpl} from 'vs/editor/common/services/modeServiceImpl';
+import {IModelService} from 'vs/editor/common/services/modelService';
+import {ModelServiceImpl} from 'vs/editor/common/services/modelServiceImpl';
+import {CodeEditorServiceImpl} from 'vs/editor/browser/services/codeEditorServiceImpl';
+import {SimpleConfigurationService, SimpleMessageService, SimpleExtensionService, StandaloneKeybindingService} from 'vs/editor/browser/standalone/simpleServices';
+import {IMenuService} from 'vs/platform/actions/common/actions';
+import {MenuService} from 'vs/platform/actions/browser/menuService';
+import {ICompatWorkerService} from 'vs/editor/common/services/compatWorkerService';
+import {MainThreadCompatWorkerService} from 'vs/editor/common/services/compatWorkerServiceMain';
 
 export interface IEditorContextViewService extends IContextViewService {
 	dispose(): void;
@@ -48,51 +46,113 @@ export interface IEditorContextViewService extends IContextViewService {
 }
 
 export interface IEditorOverrideServices {
-	threadService?:IThreadService;
+	/**
+	 * @internal
+	 */
+	compatWorkerService?: ICompatWorkerService;
+	/**
+	 * @internal
+	 */
 	modeService?: IModeService;
-	pluginService?:IPluginService;
+	/**
+	 * @internal
+	 */
+	extensionService?:IExtensionService;
+	/**
+	 * @internal
+	 */
 	instantiationService?:IInstantiationService;
+	/**
+	 * @internal
+	 */
 	messageService?:IMessageService;
+	/**
+	 * @internal
+	 */
 	markerService?:IMarkerService;
+	/**
+	 * @internal
+	 */
+	menuService?:IMenuService;
+	/**
+	 * @internal
+	 */
 	editorService?:IEditorService;
-	requestService?:IRequestService;
+	/**
+	 * @internal
+	 */
 	keybindingService?:IKeybindingService;
+	/**
+	 * @internal
+	 */
 	contextService?:IWorkspaceContextService;
+	/**
+	 * @internal
+	 */
 	contextViewService?:IEditorContextViewService;
+	/**
+	 * @internal
+	 */
 	contextMenuService?:IContextMenuService;
+	/**
+	 * @internal
+	 */
 	telemetryService?:ITelemetryService;
+	/**
+	 * @internal
+	 */
 	eventService?:IEventService;
+	/**
+	 * @internal
+	 */
 	storageService?:IStorageService;
-	searchService?:ISearchService;
+	/**
+	 * @internal
+	 */
 	configurationService?:IConfigurationService;
+	/**
+	 * @internal
+	 */
 	progressService?:IProgressService;
-	fileService?:IFileService;
+	/**
+	 * @internal
+	 */
 	modelService?: IModelService;
+	/**
+	 * @internal
+	 */
 	codeEditorService?: ICodeEditorService;
+	/**
+	 * @internal
+	 */
+	editorWorkerService?: IEditorWorkerService;
 }
 
 export interface IStaticServices {
-	threadService: IThreadService;
+	configurationService: IConfigurationService;
+	compatWorkerService: ICompatWorkerService;
 	modeService: IModeService;
-	pluginService: IPluginService;
+	extensionService: IExtensionService;
 	markerService: IMarkerService;
+	menuService: IMenuService;
 	contextService: IWorkspaceContextService;
-	requestService: IRequestService;
 	messageService: IMessageService;
 	telemetryService: ITelemetryService;
 	modelService: IModelService;
 	codeEditorService: ICodeEditorService;
+	editorWorkerService: IEditorWorkerService;
 	eventService: IEventService;
+	storageService: IStorageService;
 	instantiationService: IInstantiationService;
 }
 
 function shallowClone<T>(obj:T): T {
-	var r:T = <any>{};
+	let r:T = <any>{};
 	if (obj) {
-		for (var key in obj) {
-			if (obj.hasOwnProperty(key)) {
-				r[key] = obj[key];
-			}
+		let keys = Object.keys(obj);
+		for (let i = 0, len = keys.length; i < len; i++) {
+			let key = keys[i];
+			r[key] = obj[key];
 		}
 	}
 	return r;
@@ -103,38 +163,33 @@ export function ensureStaticPlatformServices(services: IEditorOverrideServices):
 
 	var statics = getOrCreateStaticServices(services);
 
-	services.threadService = services.threadService || statics.threadService;
-	services.pluginService = services.pluginService || statics.pluginService;
-	services.modeService = services.modeService || statics.modeService;
-	services.contextService = services.contextService || statics.contextService;
-	services.telemetryService = services.telemetryService || statics.telemetryService;
-	services.requestService = services.requestService || statics.requestService;
-	services.messageService = services.messageService || statics.messageService;
-	services.modelService = services.modelService || statics.modelService;
-	services.codeEditorService = services.codeEditorService || statics.codeEditorService;
-	services.eventService = services.eventService || statics.eventService;
-	services.markerService = services.markerService || statics.markerService;
-	services.instantiationService = statics.instantiationService;
+	let keys = Object.keys(statics);
+	for (let i = 0, len = keys.length; i < len; i++) {
+		let serviceId = keys[i];
+		if (!services.hasOwnProperty(serviceId)) {
+			services[serviceId] = statics[serviceId];
+		}
+	}
 
 	return services;
 }
 
-export function ensureDynamicPlatformServices(domElement:HTMLElement, services: IEditorOverrideServices): Lifecycle.IDisposable[] {
-	var r:Lifecycle.IDisposable[] = [];
+export function ensureDynamicPlatformServices(domElement:HTMLElement, services: IEditorOverrideServices): IDisposable[] {
+	var r:IDisposable[] = [];
 
 	if (typeof services.keybindingService === 'undefined') {
-		var keybindingService = new SimpleServices.StandaloneKeybindingService(domElement);
+		var keybindingService = new StandaloneKeybindingService(services.configurationService, services.messageService, domElement);
 		r.push(keybindingService);
 		services.keybindingService = keybindingService;
 	}
 
 	if (typeof services.contextViewService === 'undefined') {
-		var contextViewService = new ContextViewService.ContextViewService(domElement, services.telemetryService, services.messageService);
+		var contextViewService = new ContextViewService(domElement, services.telemetryService, services.messageService);
 		r.push(contextViewService);
 		services.contextViewService = contextViewService;
 	}
 	if (typeof services.contextMenuService === 'undefined') {
-		var contextMenuService = new ContextMenuService.ContextMenuService(domElement, services.telemetryService, services.messageService, contextViewService);
+		var contextMenuService = new ContextMenuService(domElement, services.telemetryService, services.messageService, contextViewService);
 		r.push(contextMenuService);
 		services.contextMenuService = contextMenuService;
 	}
@@ -150,75 +205,71 @@ export function getOrCreateStaticServices(services?: IEditorOverrideServices): I
 	}
 	services = services || {};
 
-	var contextService = services.contextService;
-	if (!contextService) {
-		var workspaceUri = URI.create('inmemory', 'model', '/');
-		contextService = new BaseWorkspaceContextService({
-			resource: workspaceUri,
-			id: null,
-			name: null,
-			uid: null,
-			mtime: null
-		}, {});
-	}
+	let serviceCollection = new ServiceCollection();
+	const instantiationService = new InstantiationService(serviceCollection, true);
 
-	var telemetryService = services.telemetryService;
+	let contextService = services.contextService || new BaseWorkspaceContextService({
+		resource: URI.from({ scheme: 'inmemory', authority: 'model', path: '/' }),
+		id: null,
+		name: null,
+		uid: null,
+		mtime: null
+	}, {});
+	serviceCollection.set(IWorkspaceContextService, contextService);
 
-	if (!telemetryService) {
-		let config = contextService.getConfiguration();
-		let enableTelemetry = config && config.env ? !!config.env.enableTelemetry: false;
-		telemetryService = new MainTelemetryService.MainTelemetryService({enableTelemetry: enableTelemetry});
-	}
+	let telemetryService = services.telemetryService || NullTelemetryService;
+	serviceCollection.set(ITelemetryService, telemetryService);
 
+	let eventService = services.eventService || new EventService();
+	serviceCollection.set(IEventService, eventService);
 
-	// warn the user that standaloneEdiktorTelemetryEndpint is absolete
-	if (Env.standaloneEditorTelemetryEndpoint) {
-		console.warn('standaloneEditorTelemetryEndpoint is obsolete');
-	}
+	let configurationService = services.configurationService || new SimpleConfigurationService(contextService, eventService);
+	serviceCollection.set(IConfigurationService, configurationService);
 
-	var threadService = services.threadService;
-	if (!threadService) {
-		threadService = new mainThreadService.MainThreadService(contextService, 'vs/editor/common/worker/editorWorkerServer');
-	}
+	let messageService = services.messageService || new SimpleMessageService();
+	serviceCollection.set(IMessageService, messageService);
 
-	var messageService = services.messageService || new SimpleServices.SimpleMessageService();
-	var pluginService = services.pluginService || new SimpleServices.SimplePluginService();
-	var markerService = services.markerService || new MarkerService.MarkerService(threadService);
-	var requestService = services.requestService || new SimpleServices.SimpleEditorRequestService(contextService, telemetryService);
+	let extensionService = services.extensionService || new SimpleExtensionService();
+	serviceCollection.set(IExtensionService, extensionService);
 
-	var modelService = services.modelService || new ModelServiceImpl(threadService, markerService);
+	let markerService = services.markerService || new MarkerService();
+	serviceCollection.set(IMarkerService, markerService);
 
-	var modeService = services.modeService;
-	if (!modeService) {
-		modeService = new MainThreadModeServiceImpl(threadService, pluginService, modelService);
-	}
+	let modeService = services.modeService || new MainThreadModeServiceImpl(instantiationService, extensionService, configurationService);
+	serviceCollection.set(IModeService, modeService);
 
-	var codeEditorService = services.codeEditorService || new CodeEditorServiceImpl();
+	let modelService = services.modelService || new ModelServiceImpl(markerService, configurationService, messageService);
+	serviceCollection.set(IModelService, modelService);
 
-	var eventService = services.eventService || new _eventService.EventService();
+	let compatWorkerService = services.compatWorkerService || new MainThreadCompatWorkerService(modelService);
+	serviceCollection.set(ICompatWorkerService, compatWorkerService);
+
+	let editorWorkerService = services.editorWorkerService || new EditorWorkerServiceImpl(modelService);
+	serviceCollection.set(IEditorWorkerService, editorWorkerService);
+
+	let codeEditorService = services.codeEditorService || new CodeEditorServiceImpl();
+	serviceCollection.set(ICodeEditorService, codeEditorService);
+
+	let menuService = services.menuService || new MenuService(extensionService);
+	serviceCollection.set(IMenuService, menuService);
 
 	staticServices = {
-		pluginService: pluginService,
+		configurationService: configurationService,
+		extensionService: extensionService,
+		compatWorkerService: compatWorkerService,
 		modeService: modeService,
-		threadService: threadService,
 		markerService: markerService,
+		menuService: menuService,
 		contextService: contextService,
 		telemetryService: telemetryService,
-		requestService: requestService,
 		messageService: messageService,
 		modelService: modelService,
 		codeEditorService: codeEditorService,
+		editorWorkerService: editorWorkerService,
 		eventService: eventService,
-		instantiationService: void 0
+		storageService: services.storageService || NullStorageService,
+		instantiationService: instantiationService
 	};
-
-	var instantiationService = InstantiationService.create(staticServices);
-	staticServices.instantiationService = InstantiationService.create(staticServices);
-	if (threadService instanceof mainThreadService.MainThreadService) {
-		threadService.setInstantiationService(instantiationService);
-	}
-	(<MainTelemetryService.MainTelemetryService> telemetryService).setInstantiationService(instantiationService);
-
 
 	return staticServices;
 }

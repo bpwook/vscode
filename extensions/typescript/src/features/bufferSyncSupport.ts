@@ -1,8 +1,11 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 'use strict';
+
+import * as fs from 'fs';
+import * as path from 'path';
 
 import { workspace, TextDocument, TextDocumentChangeEvent, TextDocumentContentChangeEvent, Disposable } from 'vscode';
 import * as Proto from '../protocol';
@@ -20,8 +23,8 @@ class SyncedBuffer {
 	private diagnosticRequestor: IDiagnosticRequestor;
 	private client: ITypescriptServiceClient;
 
-	constructor(model: TextDocument, filepath: string, diagnosticRequestor: IDiagnosticRequestor, client: ITypescriptServiceClient) {
-		this.document = model;
+	constructor(document: TextDocument, filepath: string, diagnosticRequestor: IDiagnosticRequestor, client: ITypescriptServiceClient) {
+		this.document = document;
 		this.filepath = filepath;
 		this.diagnosticRequestor = diagnosticRequestor;
 		this.client = client;
@@ -29,26 +32,10 @@ class SyncedBuffer {
 
 	public open(): void {
 		let args: Proto.OpenRequestArgs = {
-			file: this.filepath
+			file: this.filepath,
+			fileContent: this.document.getText()
 		};
 		this.client.execute('open', args, false);
-		// The last line never has a new line character at the end. So we use range.
-		// Sending a replace doesn't work if the buffer is newer then on disk and
-		// if changes are on the last line. In this case the tsserver has less characters
-		// which makes the tsserver bail since the range is invalid
-		/*
-		let lastLineRange = this.document.lineAt(this.document.lineCount - 1).range;
-		let text = this.document.getText();
-		let changeArgs: Proto.ChangeRequestArgs = {
-			file: this.filepath,
-			line: 1,
-			offset: 1,
-			endLine: lastLineRange.end.line + 1,
-			endOffset: lastLineRange.end.character + 1,
-			insertString: text
-		}
-		this.client.execute('change', changeArgs, false);
-		*/
 	}
 
 	public close(): void {
@@ -82,35 +69,80 @@ class SyncedBuffer {
 	}
 }
 
+export interface Diagnostics {
+	delete(file: string): void;
+}
+
 export default class BufferSyncSupport {
 
 	private client: ITypescriptServiceClient;
 
-	private modeId: string;
+	private _validate: boolean;
+	private modeIds: Map<boolean>;
+	private extensions: Map<boolean>;
+	private diagnostics: Diagnostics;
 	private disposables: Disposable[] = [];
-	private syncedBuffers: { [key: string]: SyncedBuffer };
+	private syncedBuffers: Map<SyncedBuffer>;
+	private closedFiles: Map<boolean>;
+
+	private projectValidationRequested: boolean;
 
 	private pendingDiagnostics: { [key: string]: number; };
 	private diagnosticDelayer: Delayer<any>;
 
-	constructor(client: ITypescriptServiceClient, modeId: string) {
+	constructor(client: ITypescriptServiceClient, modeIds: string[], diagnostics: Diagnostics, extensions: Map<boolean>, validate: boolean = true) {
 		this.client = client;
-		this.modeId = modeId;
+		this.modeIds = Object.create(null);
+		modeIds.forEach(modeId => this.modeIds[modeId] = true);
+		this.diagnostics = diagnostics;
+		this.extensions = extensions;
+		this._validate = validate;
+
+		this.projectValidationRequested = false;
 
 		this.pendingDiagnostics = Object.create(null);
 		this.diagnosticDelayer = new Delayer<any>(100);
 
 		this.syncedBuffers = Object.create(null);
-		workspace.onDidOpenTextDocument(this.onDidAddDocument, this, this.disposables);
-		workspace.onDidCloseTextDocument(this.onDidRemoveDocument, this, this.disposables);
-		workspace.onDidChangeTextDocument(this.onDidChangeDocument, this, this.disposables);
-		workspace.textDocuments.forEach(this.onDidAddDocument, this);
+		this.closedFiles = Object.create(null);
+	}
+
+	public listen(): void {
+		workspace.onDidOpenTextDocument(this.onDidOpenTextDocument, this, this.disposables);
+		workspace.onDidCloseTextDocument(this.onDidCloseTextDocument, this, this.disposables);
+		workspace.onDidChangeTextDocument(this.onDidChangeTextDocument, this, this.disposables);
+		workspace.textDocuments.forEach(this.onDidOpenTextDocument, this);
+		workspace.createFileSystemWatcher('**/*', true, true, false).onDidDelete((resource) => {
+			let filepath = this.client.asAbsolutePath(resource);
+			if (!filepath) {
+				return;
+			}
+			if (!this.syncedBuffers[filepath]) {
+				// The file is not synced (open in an editor) and got
+				// removed from disk. Make sure it is not in the closedFiles
+				// list since we shouldn't revalidate it.
+				delete this.closedFiles[filepath];
+				this.diagnostics.delete(filepath);
+			}
+		});
+	}
+
+	public get validate(): boolean {
+		return this._validate;
+	}
+
+	public set validate(value: boolean) {
+		this._validate = value;
+	}
+
+	public handles(file: string): boolean {
+		return !!this.syncedBuffers[file];
 	}
 
 	public reOpenDocuments(): void {
 		Object.keys(this.syncedBuffers).forEach(key => {
 			this.syncedBuffers[key].open();
-		})
+		});
 	}
 
 	public dispose(): void {
@@ -119,8 +151,8 @@ export default class BufferSyncSupport {
 		}
 	}
 
-	private onDidAddDocument(document: TextDocument): void {
-		if (document.languageId !== this.modeId) {
+	private onDidOpenTextDocument(document: TextDocument): void {
+		if (!this.modeIds[document.languageId]) {
 			return;
 		}
 		if (document.isUntitled) {
@@ -133,11 +165,12 @@ export default class BufferSyncSupport {
 		}
 		let syncedBuffer = new SyncedBuffer(document, filepath, this, this.client);
 		this.syncedBuffers[filepath] = syncedBuffer;
+		delete this.closedFiles[filepath];
 		syncedBuffer.open();
 		this.requestDiagnostic(filepath);
 	}
 
-	private onDidRemoveDocument(document: TextDocument): void {
+	private onDidCloseTextDocument(document: TextDocument): void {
 		let filepath: string = this.client.asAbsolutePath(document.uri);
 		if (!filepath) {
 			return;
@@ -146,11 +179,19 @@ export default class BufferSyncSupport {
 		if (!syncedBuffer) {
 			return;
 		}
+		// If the file still exists on disk keep on validating the file.
+		if (fs.existsSync(filepath) && this.extensions[path.extname(filepath)]) {
+			this.closedFiles[filepath] = true;
+		} else {
+			// Ensure we don't have the file in the map and clear all errors.
+			delete this.closedFiles[filepath];
+			this.diagnostics.delete(filepath);
+		}
 		delete this.syncedBuffers[filepath];
 		syncedBuffer.close();
 	}
 
-	private onDidChangeDocument(e: TextDocumentChangeEvent): void {
+	private onDidChangeTextDocument(e: TextDocumentChangeEvent): void {
 		let filepath: string = this.client.asAbsolutePath(e.document.uri);
 		if (!filepath) {
 			return;
@@ -163,6 +204,9 @@ export default class BufferSyncSupport {
 	}
 
 	public requestAllDiagnostics() {
+		if (!this._validate) {
+			return;
+		}
 		Object.keys(this.syncedBuffers).forEach(filePath => this.pendingDiagnostics[filePath] = Date.now());
 		this.diagnosticDelayer.trigger(() => {
 			this.sendPendingDiagnostics();
@@ -170,6 +214,10 @@ export default class BufferSyncSupport {
 	}
 
 	public requestDiagnostic(file: string): void {
+		if (!this._validate || this.client.experimentalAutoBuild) {
+			return;
+		}
+
 		this.pendingDiagnostics[file] = Date.now();
 		this.diagnosticDelayer.trigger(() => {
 			this.sendPendingDiagnostics();
@@ -177,6 +225,9 @@ export default class BufferSyncSupport {
 	}
 
 	private sendPendingDiagnostics(): void {
+		if (!this._validate) {
+			return;
+		}
 		let files = Object.keys(this.pendingDiagnostics).map((key) => {
 			return {
 				file: key,
@@ -193,6 +244,13 @@ export default class BufferSyncSupport {
 			if (!this.pendingDiagnostics[file]) {
 				files.push(file);
 			}
+		});
+
+		// Now add all files that we have requested diagnostics for but are now
+		// closed. Otherwise it might be confusing that interfile dependent markers
+		// don't get fixed.
+		Object.keys(this.closedFiles).forEach((file) => {
+			files.push(file);
 		});
 
 		let args: Proto.GeterrRequestArgs = {

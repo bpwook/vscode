@@ -10,6 +10,7 @@ declare module "vscode-textmate" {
  */
 export interface IGrammarLocator {
 	getFilePath(scopeName:string): string;
+	getInjections(scopeName:string): string[];
 }
 
 /**
@@ -56,14 +57,14 @@ export interface IGrammar {
 }
 
 export interface ITokenizeLineResult {
-	tokens: IToken[];
+	tokens: ITMToken[];
 	/**
 	 * The `prevState` to be passed on to the next line tokenization.
 	 */
 	ruleStack: StackElement[];
 }
 
-export interface IToken {
+export interface ITMToken {
 	startIndex: number;
 	endIndex: number;
 	scopes: string[];

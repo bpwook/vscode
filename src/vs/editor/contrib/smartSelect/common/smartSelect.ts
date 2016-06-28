@@ -4,29 +4,28 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import nls = require('vs/nls');
-import Arrays = require('vs/base/common/arrays');
+import * as nls from 'vs/nls';
+import * as arrays from 'vs/base/common/arrays';
+import {KeyCode, KeyMod} from 'vs/base/common/keyCodes';
 import {TPromise} from 'vs/base/common/winjs.base';
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
-import {CommonEditorRegistry, ContextKey, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
-import {EditorAction, Behaviour} from 'vs/editor/common/editorAction';
-import TokenSelectionSupport = require('./tokenSelectionSupport');
-import tokenTree = require('./tokenTree');
+import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {Range} from 'vs/editor/common/core/range';
-import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation'
-import {KeyMod, KeyCode} from 'vs/base/common/keyCodes';
+import {EditorAction} from 'vs/editor/common/editorAction';
+import {Behaviour} from 'vs/editor/common/editorActionEnablement';
+import {ICommonCodeEditor, ICursorPositionChangedEvent, IEditorActionDescriptorData} from 'vs/editor/common/editorCommon';
+import {CommonEditorRegistry, ContextKey, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
+import {TokenSelectionSupport, ILogicalSelectionEntry} from './tokenSelectionSupport';
 
 // --- selection state machine
 
 class State {
 
-	public editor:EditorCommon.ICommonCodeEditor;
+	public editor:ICommonCodeEditor;
 	public next:State;
 	public previous:State;
-	public selection:EditorCommon.IEditorRange;
+	public selection:Range;
 
-	constructor(editor:EditorCommon.ICommonCodeEditor) {
+	constructor(editor:ICommonCodeEditor) {
 		this.editor = editor;
 		this.next = null;
 		this.previous = null;
@@ -45,7 +44,7 @@ class SmartSelect extends EditorAction {
 	private _forward: boolean;
 	private _tokenSelectionSupport: TokenSelectionSupport;
 
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor, forward: boolean, instantiationService: IInstantiationService) {
+	constructor(descriptor:IEditorActionDescriptorData, editor:ICommonCodeEditor, forward: boolean, instantiationService: IInstantiationService) {
 		super(descriptor, editor, Behaviour.TextFocus | Behaviour.UpdateOnModelChange);
 		this._tokenSelectionSupport = instantiationService.createInstance(TokenSelectionSupport);
 		this._forward = forward;
@@ -55,7 +54,6 @@ class SmartSelect extends EditorAction {
 
 		var selection = this.editor.getSelection();
 		var model = this.editor.getModel();
-		var selectionSupport = model.getMode().logicalSelectionSupport || this._tokenSelectionSupport;
 
 		// forget about current state
 		if (state) {
@@ -66,10 +64,9 @@ class SmartSelect extends EditorAction {
 
 		var promise:TPromise<void> = TPromise.as(null);
 		if (!state) {
+			promise = this._tokenSelectionSupport.getRangesToPosition(model.uri, selection.getStartPosition()).then((elements: ILogicalSelectionEntry[]) => {
 
-			promise = selectionSupport.getRangesToPosition(model.getAssociatedResource(), selection.getStartPosition()).then((elements: Modes.ILogicalSelectionEntry[]) => {
-
-				if (Arrays.isFalsyOrEmpty(elements)) {
+				if (arrays.isFalsyOrEmpty(elements)) {
 					return;
 				}
 
@@ -101,12 +98,12 @@ class SmartSelect extends EditorAction {
 				state = editorState;
 
 				// listen to caret move and forget about state
-				var unhook: () => void = this.editor.addListener(EditorCommon.EventType.CursorPositionChanged,(e: EditorCommon.ICursorPositionChangedEvent) => {
+				var unhook = this.editor.onDidChangeCursorPosition((e: ICursorPositionChangedEvent) => {
 					if (ignoreSelection) {
 						return;
 					}
 					state = null;
-					unhook();
+					unhook.dispose();
 				});
 			});
 		}
@@ -138,7 +135,7 @@ class GrowSelectionAction extends SmartSelect {
 
 	public static ID = 'editor.action.smartSelect.grow';
 
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor, @IInstantiationService instantiationService: IInstantiationService) {
+	constructor(descriptor:IEditorActionDescriptorData, editor:ICommonCodeEditor, @IInstantiationService instantiationService: IInstantiationService) {
 		super(descriptor, editor, true, instantiationService);
 	}
 }
@@ -147,7 +144,7 @@ class ShrinkSelectionAction extends SmartSelect {
 
 	public static ID = 'editor.action.smartSelect.shrink';
 
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor, @IInstantiationService instantiationService: IInstantiationService) {
+	constructor(descriptor:IEditorActionDescriptorData, editor:ICommonCodeEditor, @IInstantiationService instantiationService: IInstantiationService) {
 		super(descriptor, editor, false, instantiationService);
 	}
 }
@@ -157,9 +154,9 @@ CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(GrowSelecti
 	context: ContextKey.EditorTextFocus,
 	primary: KeyMod.Shift | KeyMod.Alt | KeyCode.RightArrow,
 	mac: { primary: KeyMod.CtrlCmd | KeyMod.WinCtrl | KeyMod.Shift | KeyCode.RightArrow }
-}));
+}, 'Expand Select'));
 CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(ShrinkSelectionAction, ShrinkSelectionAction.ID, nls.localize('smartSelect.shrink', "Shrink Select"), {
 	context: ContextKey.EditorTextFocus,
 	primary: KeyMod.Shift | KeyMod.Alt | KeyCode.LeftArrow,
 	mac: { primary: KeyMod.CtrlCmd | KeyMod.WinCtrl | KeyMod.Shift | KeyCode.LeftArrow }
-}));
+}, 'Shrink Select'));

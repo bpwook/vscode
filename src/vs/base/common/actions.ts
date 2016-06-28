@@ -4,23 +4,23 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import {Promise} from 'vs/base/common/winjs.base';
-import { IEventEmitter, EventEmitter, ListenerCallback, IBulkListenerCallback, ListenerUnbind } from 'vs/base/common/eventEmitter';
-import Lifecycle = require('vs/base/common/lifecycle');
-import Events = require('vs/base/common/events');
+import {TPromise} from 'vs/base/common/winjs.base';
+import { IEventEmitter, EventEmitter } from 'vs/base/common/eventEmitter';
+import {IDisposable} from 'vs/base/common/lifecycle';
+import * as Events from 'vs/base/common/events';
 
-export interface IAction extends Lifecycle.IDisposable {
+export interface IAction extends IDisposable {
 	id: string;
 	label: string;
 	tooltip: string;
 	class: string;
 	enabled: boolean;
 	checked: boolean;
-	run(event?: any): Promise;
+	run(event?: any): TPromise<any>;
 }
 
 export interface IActionRunner extends IEventEmitter {
-	run(action: IAction, context?: any): Promise;
+	run(action: IAction, context?: any): TPromise<any>;
 }
 
 export interface IActionItem extends IEventEmitter {
@@ -34,7 +34,7 @@ export interface IActionItem extends IEventEmitter {
 }
 
 /**
- * Checks if the provided object is compatabile
+ * Checks if the provided object is compatible
  * with the IAction interface.
  * @param thing an object
  */
@@ -61,7 +61,7 @@ export function isAction(thing: any): thing is IAction {
 }
 
 export interface IActionCallback {
-	(event: any): Promise;
+	(event: any): TPromise<any>;
 }
 
 export interface IActionProvider {
@@ -70,11 +70,11 @@ export interface IActionProvider {
 
 export class Action extends EventEmitter implements IAction {
 
-	static LABEL = 'label';
-	static TOOLTIP = 'tooltip';
-	static CLASS = 'class';
-	static ENABLED = 'enabled';
-	static CHECKED = 'checked';
+	static LABEL: string = 'label';
+	static TOOLTIP: string = 'tooltip';
+	static CLASS: string = 'class';
+	static ENABLED: string = 'enabled';
+	static CHECKED: string = 'checked';
 
 	public _id: string;
 	public _label: string;
@@ -190,97 +190,13 @@ export class Action extends EventEmitter implements IAction {
 		this._actionCallback = value;
 	}
 
-	public run(event?: any): Promise {
+	public run(event?: any): TPromise<any> {
 		if (this._actionCallback !== null) {
 			return this._actionCallback(event);
 		} else {
-			return Promise.as(true);
+			return TPromise.as(true);
 		}
 	}
-}
-
-class ProxyAction extends Action implements IEventEmitter {
-
-	constructor(private delegate: Action, private runHandler: (e: any) => void) {
-		super(delegate.id, delegate.label, delegate.class, delegate.enabled, null);
-	}
-
-	public get id(): string {
-		return this.delegate.id;
-	}
-
-	public get label(): string {
-		return this.delegate.label;
-	}
-
-	public set label(value: string) {
-		this.delegate.label = value;
-	}
-
-	public get class(): string {
-		return this.delegate.class;
-	}
-
-	public set class(value: string) {
-		this.delegate.class = value;
-	}
-
-	public get enabled(): boolean {
-		return this.delegate.enabled;
-	}
-
-	public set enabled(value: boolean) {
-		this.delegate.enabled = value;
-	}
-
-	public get checked(): boolean {
-		return this.delegate.checked;
-	}
-
-	public set checked(value: boolean) {
-		this.delegate.checked = value;
-	}
-
-	public run(event?: any): Promise {
-		this.runHandler(event);
-		return this.delegate.run(event);
-	}
-
-	public addListener(eventType: string, listener: ListenerCallback): ListenerUnbind {
-		return this.delegate.addListener(eventType, listener);
-	}
-
-	public addBulkListener(listener: IBulkListenerCallback): ListenerUnbind {
-		return this.delegate.addBulkListener(listener);
-	}
-
-	public addEmitter(eventEmitter: IEventEmitter, emitterType?: string): ListenerUnbind {
-		return this.delegate.addEmitter(eventEmitter, emitterType);
-	}
-
-	public addEmitterTypeListener(eventType: string, emitterType: string, listener: ListenerCallback): ListenerUnbind {
-		return this.delegate.addEmitterTypeListener(eventType, emitterType, listener);
-	}
-
-	public emit(eventType: string, data?: any): void {
-		this.delegate.emit(eventType, data);
-	}
-}
-
-export function radioGroup(actions: Action[]): Action[] {
-
-	function newCecker(action: Action): any {
-		return function() {
-			actions.forEach((otherAction: Action) => {
-				otherAction.checked = (otherAction === action);
-			});
-		};
-	};
-
-	return actions.map(function(action) {
-		return new ProxyAction(action, newCecker(action));
-	});
-
 }
 
 export interface IRunEvent {
@@ -291,14 +207,14 @@ export interface IRunEvent {
 
 export class ActionRunner extends EventEmitter implements IActionRunner {
 
-	public run(action: IAction, context?: any): Promise {
+	public run(action: IAction, context?: any): TPromise<any> {
 		if (!action.enabled) {
-			return Promise.as(null);
+			return TPromise.as(null);
 		}
 
 		this.emit(Events.EventType.BEFORE_RUN, { action: action });
 
-		return Promise.as(action.run(context)).then((result: any) => {
+		return TPromise.as(action.run(context)).then((result: any) => {
 			this.emit(Events.EventType.RUN, <IRunEvent>{ action: action, result: result });
 		}, (error: any) => {
 			this.emit(Events.EventType.RUN, <IRunEvent>{ action: action, error: error });

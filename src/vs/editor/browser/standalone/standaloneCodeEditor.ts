@@ -5,108 +5,113 @@
 
 'use strict';
 
-import {TPromise} from 'vs/base/common/winjs.base';
-import CodeEditorWidget = require('vs/editor/browser/widget/codeEditorWidget');
-import SimpleServices = require('vs/editor/browser/standalone/simpleServices');
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
-import standaloneServices = require('vs/editor/browser/standalone/standaloneServices');
-import Platform = require('vs/platform/platform');
-import Network = require('vs/base/common/network');
-import Model = require('vs/editor/common/model/model');
-import Lifecycle = require('vs/base/common/lifecycle');
-import MonarchTypes = require('vs/editor/common/modes/monarch/monarchTypes');
-import InstantiationService = require('vs/platform/instantiation/common/instantiationService');
-import DiffEditorWidget = require('vs/editor/browser/widget/diffEditorWidget');
-import {DefaultConfig} from 'vs/editor/common/config/defaultConfig';
-import {IPluginDescription} from 'vs/platform/plugins/common/plugins';
-import {PluginsRegistry} from 'vs/platform/plugins/common/pluginsRegistry';
-import monarch = require('vs/editor/common/modes/monarch/monarch');
-import vscode = require('vscode');
-import {RemoteTelemetryServiceHelper} from 'vs/platform/telemetry/common/abstractRemoteTelemetryService';
-import {IEditorService} from 'vs/platform/editor/common/editor';
-import {IMarkerService} from 'vs/platform/markers/common/markers';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {IKeybindingService, IKeybindingContextKey, ICommandHandler} from 'vs/platform/keybinding/common/keybindingService';
-import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
+import {IDisposable, dispose} from 'vs/base/common/lifecycle';
 import {IContextViewService} from 'vs/platform/contextview/browser/contextView';
-import {IModeService} from 'vs/editor/common/services/modeService';
-import {IModelService} from 'vs/editor/common/services/modelService';
-import colorizer = require('vs/editor/browser/standalone/colorizer');
-import {IEditorModesRegistry, Extensions} from 'vs/editor/common/modes/modesRegistry';
-import {Registry} from 'vs/platform/platform';
-import {createAsyncDescriptor0} from 'vs/platform/instantiation/common/descriptors';
-import {LanguageExtensions, ILanguageExtensionPoint} from 'vs/editor/common/modes/languageExtensionPoint';
+import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
 import {AbstractKeybindingService} from 'vs/platform/keybinding/browser/keybindingServiceImpl';
+import {ICommandHandler, IKeybindingContextKey, IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
+import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {IActionDescriptor, ICodeEditorWidgetCreationOptions, IDiffEditorOptions, IModel, IModelChangedEvent, EventType} from 'vs/editor/common/editorCommon';
 import {ICodeEditorService} from 'vs/editor/common/services/codeEditorService';
+import {IEditorWorkerService} from 'vs/editor/common/services/editorWorkerService';
+import {StandaloneKeybindingService} from 'vs/editor/browser/standalone/simpleServices';
+import {IEditorContextViewService, IEditorOverrideServices, ensureStaticPlatformServices, getOrCreateStaticServices} from 'vs/editor/browser/standalone/standaloneServices';
+import {CodeEditorWidget} from 'vs/editor/browser/widget/codeEditorWidget';
+import {DiffEditorWidget} from 'vs/editor/browser/widget/diffEditorWidget';
+import {ICodeEditor, IDiffEditor} from 'vs/editor/browser/editorBrowser';
 
-// Set defaults for standalone editor
-DefaultConfig.editor.wrappingIndent = 'none';
-
-export interface IEditorConstructionOptions extends EditorCommon.ICodeEditorWidgetCreationOptions {
+/**
+ * The options to create an editor.
+ */
+export interface IEditorConstructionOptions extends ICodeEditorWidgetCreationOptions {
+	/**
+	 * The initial value of the auto created model in the editor.
+	 * To not create automatically a model, use `model: null`.
+	 */
 	value?: string;
-	mode?: string;
-}
-export interface IDiffEditorConstructionOptions extends EditorCommon.IDiffEditorOptions {
+	/**
+	 * The initial language of the auto created model in the editor.
+	 * To not create automatically a model, use `model: null`.
+	 */
+	language?: string;
 }
 
-class StandaloneEditor extends CodeEditorWidget.CodeEditorWidget {
+/**
+ * The options to create a diff editor.
+ */
+export interface IDiffEditorConstructionOptions extends IDiffEditorOptions {
+}
 
-	private _editorService:IEditorService;
-	private _standaloneKeybindingService: SimpleServices.StandaloneKeybindingService;
-	private _contextViewService:standaloneServices.IEditorContextViewService;
-	private _markerService: IMarkerService;
+export interface IStandaloneCodeEditor extends ICodeEditor {
+	addCommand(keybinding:number, handler:ICommandHandler, context:string): string;
+	createContextKey<T>(key: string, defaultValue: T): IKeybindingContextKey<T>;
+	addAction(descriptor:IActionDescriptor): void;
+}
+
+export interface IStandaloneDiffEditor extends IDiffEditor {
+	addCommand(keybinding:number, handler:ICommandHandler, context:string): string;
+	createContextKey<T>(key: string, defaultValue: T): IKeybindingContextKey<T>;
+	addAction(descriptor:IActionDescriptor): void;
+}
+
+export class StandaloneEditor extends CodeEditorWidget implements IStandaloneCodeEditor {
+
+	private _standaloneKeybindingService: StandaloneKeybindingService;
+	private _contextViewService:IEditorContextViewService;
 	private _ownsModel:boolean;
-	private _toDispose2: Lifecycle.IDisposable[];
+	private _toDispose2: IDisposable[];
 
 	constructor(
 		domElement:HTMLElement,
 		options:IEditorConstructionOptions,
-		toDispose: Lifecycle.IDisposable[],
+		toDispose: IDisposable[],
 		@IInstantiationService instantiationService: IInstantiationService,
 		@ICodeEditorService codeEditorService: ICodeEditorService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@ITelemetryService telemetryService: ITelemetryService,
-		@IContextViewService contextViewService: IContextViewService,
-		@IEditorService editorService: IEditorService,
-		@IMarkerService markerService: IMarkerService
+		@IContextViewService contextViewService: IContextViewService
 	) {
 		if (keybindingService instanceof AbstractKeybindingService) {
 			(<AbstractKeybindingService><any>keybindingService).setInstantiationService(instantiationService);
 		}
 
-		if (keybindingService instanceof SimpleServices.StandaloneKeybindingService) {
-			this._standaloneKeybindingService = <SimpleServices.StandaloneKeybindingService>keybindingService;
+		options = options || {};
+		super(domElement, options, instantiationService, codeEditorService, keybindingService.createScoped(domElement), telemetryService);
+
+		if (keybindingService instanceof StandaloneKeybindingService) {
+			this._standaloneKeybindingService = <StandaloneKeybindingService>keybindingService;
 		}
 
-		this._contextViewService = <standaloneServices.IEditorContextViewService>contextViewService;
-		this._editorService = editorService;
-		this._markerService = markerService;
+		this._contextViewService = <IEditorContextViewService>contextViewService;
 		this._toDispose2 = toDispose;
 
-		options = options || {};
+		let model: IModel = null;
 		if (typeof options.model === 'undefined') {
-			options.model = (<any>self).Monaco.Editor.createModel(options.value || '', options.mode || 'text/plain');
+			model = (<any>self).monaco.editor.createModel(options.value || '', options.language || 'text/plain');
 			this._ownsModel = true;
 		} else {
+			model = options.model;
+			delete options.model;
 			this._ownsModel = false;
 		}
 
-		super(domElement, options, instantiationService, codeEditorService, keybindingService, telemetryService);
+		this._attachModel(model);
+		if (model) {
+			let e: IModelChangedEvent = {
+				oldModelUrl: null,
+				newModelUrl: model.uri
+			};
+			this.emit(EventType.ModelChanged, e);
+		}
 	}
 
 	public dispose(): void {
 		super.dispose();
-		this._toDispose2 = Lifecycle.disposeAll(this._toDispose2);
+		this._toDispose2 = dispose(this._toDispose2);
 	}
 
 	public destroy(): void {
 		this.dispose();
-	}
-
-	public getMarkerService():IMarkerService {
-		return this._markerService;
 	}
 
 	public addCommand(keybinding:number, handler:ICommandHandler, context:string): string {
@@ -125,7 +130,7 @@ class StandaloneEditor extends CodeEditorWidget.CodeEditorWidget {
 		return this._standaloneKeybindingService.createKey(key, defaultValue);
 	}
 
-	public addAction(descriptor:EditorCommon.IActionDescriptor): void {
+	public addAction(descriptor:IActionDescriptor): void {
 		super.addAction(descriptor);
 		if (!this._standaloneKeybindingService) {
 			console.warn('Cannot add keybinding because the editor is configured with an unrecognized KeybindingService');
@@ -141,22 +146,14 @@ class StandaloneEditor extends CodeEditorWidget.CodeEditorWidget {
 		}
 	}
 
-	public getTelemetryService():ITelemetryService {
-		return this._telemetryService;
-	}
-
-	public getEditorService():IEditorService {
-		return this._editorService;
-	}
-
-	_attachModel(model:EditorCommon.IModel):void {
+	_attachModel(model:IModel):void {
 		super._attachModel(model);
 		if (this._view) {
 			this._contextViewService.setContainer(this._view.domNode);
 		}
 	}
 
-	_postDetachModelCleanup(detachedModel:EditorCommon.IModel): void {
+	_postDetachModelCleanup(detachedModel:IModel): void {
 		super._postDetachModelCleanup(detachedModel);
 		if (detachedModel && this._ownsModel) {
 			detachedModel.destroy();
@@ -165,49 +162,45 @@ class StandaloneEditor extends CodeEditorWidget.CodeEditorWidget {
 	}
 }
 
-class StandaloneDiffEditor extends DiffEditorWidget.DiffEditorWidget {
+export class StandaloneDiffEditor extends DiffEditorWidget implements IStandaloneDiffEditor {
 
-	private _editorService:IEditorService;
-	private _contextViewService:standaloneServices.IEditorContextViewService;
-	private _standaloneKeybindingService: SimpleServices.StandaloneKeybindingService;
-	private _toDispose2: Lifecycle.IDisposable[];
-	private _markerService: IMarkerService;
-	private _telemetryService: ITelemetryService;
+	private _contextViewService:IEditorContextViewService;
+	private _standaloneKeybindingService: StandaloneKeybindingService;
+	private _toDispose2: IDisposable[];
 
-	constructor(domElement:HTMLElement, options:IDiffEditorConstructionOptions, toDispose: Lifecycle.IDisposable[], @IInstantiationService instantiationService: IInstantiationService, @IKeybindingService keybindingService: IKeybindingService, @IContextViewService contextViewService: IContextViewService, @IEditorService editorService: IEditorService, @IMarkerService markerService: IMarkerService, @ITelemetryService telemetryService: ITelemetryService) {
+	constructor(
+		domElement:HTMLElement,
+		options:IDiffEditorConstructionOptions,
+		toDispose: IDisposable[],
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IKeybindingService keybindingService: IKeybindingService,
+		@IContextViewService contextViewService: IContextViewService,
+		@IEditorWorkerService editorWorkerService: IEditorWorkerService
+	) {
 		if (keybindingService instanceof AbstractKeybindingService) {
 			(<AbstractKeybindingService><any>keybindingService).setInstantiationService(instantiationService);
 		}
 
-		if (keybindingService instanceof SimpleServices.StandaloneKeybindingService) {
-			this._standaloneKeybindingService = <SimpleServices.StandaloneKeybindingService>keybindingService;
+		super(domElement, options, editorWorkerService, keybindingService, instantiationService);
+
+		if (keybindingService instanceof StandaloneKeybindingService) {
+			this._standaloneKeybindingService = <StandaloneKeybindingService>keybindingService;
 		}
 
-		this._contextViewService = <standaloneServices.IEditorContextViewService>contextViewService;
-		this._editorService = editorService;
-		this._markerService = markerService;
-		this._telemetryService = telemetryService;
+		this._contextViewService = <IEditorContextViewService>contextViewService;
 
 		this._toDispose2 = toDispose;
-
-		options = options || {};
-
-		super(domElement, options, instantiationService);
 
 		this._contextViewService.setContainer(this._containerDomElement);
 	}
 
 	public dispose(): void {
 		super.dispose();
-		this._toDispose2 = Lifecycle.disposeAll(this._toDispose2);
+		this._toDispose2 = dispose(this._toDispose2);
 	}
 
 	public destroy(): void {
 		this.dispose();
-	}
-
-	public getMarkerService():IMarkerService {
-		return this._markerService;
 	}
 
 	public addCommand(keybinding:number, handler:ICommandHandler, context:string): string {
@@ -226,7 +219,7 @@ class StandaloneDiffEditor extends DiffEditorWidget.DiffEditorWidget {
 		return this._standaloneKeybindingService.createKey(key, defaultValue);
 	}
 
-	public addAction(descriptor:EditorCommon.IActionDescriptor): void {
+	public addAction(descriptor:IActionDescriptor): void {
 		super.addAction(descriptor);
 		if (!this._standaloneKeybindingService) {
 			console.warn('Cannot add keybinding because the editor is configured with an unrecognized KeybindingService');
@@ -241,13 +234,9 @@ class StandaloneDiffEditor extends DiffEditorWidget.DiffEditorWidget {
 			});
 		}
 	}
-
-	public getTelemetryService():ITelemetryService {
-		return this._telemetryService;
-	}
 }
 
-var startup = (function() {
+export var startup = (function() {
 
 	var modesRegistryInitialized = false;
 	var setupServicesCalled = false;
@@ -258,207 +247,22 @@ var startup = (function() {
 				return;
 			}
 			modesRegistryInitialized = true;
-			var staticServices = standaloneServices.getOrCreateStaticServices();
-
-			// Instantiate thread actors
-			staticServices.threadService.getRemotable(RemoteTelemetryServiceHelper);
+			getOrCreateStaticServices();
 		},
 
-		setupServices: function(services: standaloneServices.IEditorOverrideServices): standaloneServices.IEditorOverrideServices {
+		setupServices: function(services: IEditorOverrideServices): IEditorOverrideServices {
 			if (setupServicesCalled) {
-				console.error('Call to Monaco.Editor.setupServices is ignored because it was called before');
+				console.error('Call to monaco.editor.setupServices is ignored because it was called before');
 				return;
 			}
 			setupServicesCalled = true;
 			if (modesRegistryInitialized) {
-				console.error('Call to Monaco.Editor.setupServices is ignored because other API was called before');
+				console.error('Call to monaco.editor.setupServices is ignored because other API was called before');
 				return;
 			}
 
-			return standaloneServices.ensureStaticPlatformServices(services);
+			return ensureStaticPlatformServices(services);
 		}
 	};
 
 })();
-
-function shallowClone<T>(obj:T): T {
-	var r:T = <any>{};
-	if (obj) {
-		for (var key in obj) {
-			if (obj.hasOwnProperty(key)) {
-				r[key] = obj[key];
-			}
-		}
-	}
-	return r;
-}
-
-export var setupServices = startup.setupServices;
-
-export function create(domElement:HTMLElement, options:IEditorConstructionOptions, services:standaloneServices.IEditorOverrideServices):EditorBrowser.ICodeEditor {
-	startup.initStaticServicesIfNecessary();
-
-	services = shallowClone(services);
-	var editorService: SimpleServices.SimpleEditorService = null;
-	if (!services || !services.editorService) {
-		editorService = new SimpleServices.SimpleEditorService();
-		services.editorService = editorService;
-	}
-
-	var t = prepareServices(domElement, services);
-	var result = t.ctx.instantiationService.createInstance(StandaloneEditor, domElement, options, t.toDispose);
-
-	if (editorService) {
-		editorService.setEditor(result);
-	}
-
-	return result;
-}
-
-export function createDiffEditor(domElement:HTMLElement, options:IDiffEditorConstructionOptions, services: standaloneServices.IEditorOverrideServices):EditorBrowser.IDiffEditor {
-	startup.initStaticServicesIfNecessary();
-
-	services = shallowClone(services);
-	var editorService: SimpleServices.SimpleEditorService = null;
-	if (!services || !services.editorService) {
-		editorService = new SimpleServices.SimpleEditorService();
-		services.editorService = editorService;
-	}
-
-	var t = prepareServices(domElement, services);
-	var result = t.ctx.instantiationService.createInstance(StandaloneDiffEditor, domElement, options, t.toDispose);
-
-	if (editorService) {
-		editorService.setEditor(result);
-	}
-
-	return result;
-}
-
-function prepareServices(domElement: HTMLElement, services: standaloneServices.IEditorOverrideServices): { ctx: standaloneServices.IEditorOverrideServices; toDispose: Lifecycle.IDisposable[]; } {
-	services = standaloneServices.ensureStaticPlatformServices(services);
-	var toDispose = standaloneServices.ensureDynamicPlatformServices(domElement, services);
-	services.instantiationService = InstantiationService.create(services);
-
-	return {
-		ctx: services,
-		toDispose: toDispose
-	};
-}
-
-function createModelWithRegistryMode(modelService:IModelService, modeService:IModeService, value:string, modeName:string, associatedResource?:Network.URL): EditorCommon.IModel {
-	var modeInformation = modeService.lookup(modeName);
-	if (modeInformation.length > 0) {
-		// Force usage of the first existing mode
-		modeName = modeInformation[0].modeId;
-	} else {
-		// Fall back to plain/text
-		modeName = 'plain/text';
-	}
-	var mode = modeService.getMode(modeName);
-	if (mode) {
-		return modelService.createModel(value, mode, associatedResource);
-	}
-	return modelService.createModel(value, modeService.getOrCreateMode(modeName), associatedResource);
-}
-
-export function createModel(value:string, mode:string|MonarchTypes.ILanguage|Modes.IMode, associatedResource?:Network.URL|string): EditorCommon.IModel {
-	startup.initStaticServicesIfNecessary();
-	var modelService = standaloneServices.ensureStaticPlatformServices(null).modelService;
-
-	var resource:Network.URL;
-	if (typeof associatedResource === 'string') {
-		resource = new Network.URL(associatedResource);
-	} else {
-		// must be a URL
-		resource = associatedResource;
-	}
-
-	if (typeof (<Modes.IMode>mode).getId === 'function') {
-		// mode is an IMode
-		return modelService.createModel(value, <Modes.IMode>mode, resource);
-	}
-
-	if (typeof mode === 'string') {
-		// mode is a string
-		var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-		return createModelWithRegistryMode(modelService, modeService, value, mode, resource);
-	}
-
-	// mode must be an ILanguage
-	return modelService.createModel(value, createCustomMode(<MonarchTypes.ILanguage>mode), resource);
-}
-
-export function getOrCreateMode(mimetypes: string):TPromise<Modes.IMode> {
-	startup.initStaticServicesIfNecessary();
-	var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-
-	return modeService.getOrCreateMode(mimetypes);
-}
-
-export function configureMode(modeId: string, options: any): void {
-	startup.initStaticServicesIfNecessary();
-	var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-
-	modeService.configureModeById(modeId, options);
-}
-
-export function registerWorkerParticipant(modeId:string, moduleName:string, ctorName:string): void {
-	var modeRegistry = <IEditorModesRegistry> Registry.as(Extensions.EditorModes);
-	modeRegistry.registerWorkerParticipant(modeId, createAsyncDescriptor0<Modes.IWorkerParticipant>(moduleName, ctorName));
-}
-
-export function getAPI(): typeof vscode {
-	startup.initStaticServicesIfNecessary();
-	return require('vscode');
-}
-
-export function createCustomMode(language:MonarchTypes.ILanguage): TPromise<Modes.IMode> {
-	startup.initStaticServicesIfNecessary();
-	var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-
-	var modeId = language.name;
-	var name = language.name;
-
-	LanguageExtensions.registerLanguage({
-		id: modeId,
-		aliases: [name]
-	});
-
-	PluginsRegistry.registerOneTimeActivationEventListener('onLanguage:' + modeId, () => {
-		modeService.registerMonarchDefinition(modeId, language);
-	});
-
-	return modeService.getOrCreateMode(modeId);
-}
-
-export function registerStandaloneLanguage(language:ILanguageExtensionPoint, defModule:string): void {
-	LanguageExtensions.registerLanguage(language);
-
-	PluginsRegistry.registerOneTimeActivationEventListener('onLanguage:' + language.id, () => {
-		require([defModule], (value:{language:MonarchTypes.ILanguage}) => {
-			if (!value.language) {
-				console.error('Expected ' + defModule + ' to export a `language`');
-				return;
-			}
-
-			startup.initStaticServicesIfNecessary();
-			var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-			modeService.registerMonarchDefinition(language.id, value.language);
-		}, (err) => {
-			console.error('Cannot find module ' + defModule, err);
-		});
-	});
-}
-
-export function colorizeElement(domNode:HTMLElement, options:colorizer.IColorizerElementOptions): TPromise<void> {
-	startup.initStaticServicesIfNecessary();
-	var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-	return colorizer.colorizeElement(modeService, domNode, options);
-}
-
-export function colorize(text:string, mimeType:string, options:colorizer.IColorizerOptions): TPromise<string> {
-	startup.initStaticServicesIfNecessary();
-	var modeService = standaloneServices.ensureStaticPlatformServices(null).modeService;
-	return colorizer.colorize(modeService, text, mimeType, options);
-}

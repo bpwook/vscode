@@ -4,25 +4,24 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import Modes = require('vs/editor/common/modes');
-import EditorCommon = require('vs/editor/common/editorCommon');
+import * as modes from 'vs/editor/common/modes';
 
-export class NullState implements Modes.IState {
+export class NullState implements modes.IState {
 
-	private mode: Modes.IMode;
-	private stateData: Modes.IState;
+	private mode: modes.IMode;
+	private stateData: modes.IState;
 
-	constructor(mode: Modes.IMode, stateData: Modes.IState) {
+	constructor(mode: modes.IMode, stateData: modes.IState) {
 		this.mode = mode;
 		this.stateData = stateData;
 	}
 
-	public clone(): Modes.IState {
-		var stateDataClone:Modes.IState = (this.stateData ? this.stateData.clone() : null);
+	public clone(): modes.IState {
+		var stateDataClone:modes.IState = (this.stateData ? this.stateData.clone() : null);
 		return new NullState(this.mode, stateDataClone);
 	}
 
-	public equals(other:Modes.IState): boolean {
+	public equals(other:modes.IState): boolean {
 		if (this.mode !== other.getMode()) {
 			return false;
 		}
@@ -36,76 +35,50 @@ export class NullState implements Modes.IState {
 		return false;
 	}
 
-	public getMode(): Modes.IMode {
+	public getMode(): modes.IMode {
 		return this.mode;
 	}
 
-	public tokenize(stream:Modes.IStream):Modes.ITokenizationResult {
+	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
 		stream.advanceToEOS();
 		return { type:'' };
 	}
 
-	public getStateData(): Modes.IState {
+	public getStateData(): modes.IState {
 		return this.stateData;
 	}
 
-	public setStateData(stateData:Modes.IState):void {
+	public setStateData(stateData:modes.IState):void {
 		this.stateData = stateData;
 	}
 }
 
-export class NullMode implements Modes.IMode {
+export class NullMode implements modes.IMode {
 
-	/**
-	 * Create a word definition regular expression based on default word separators.
-	 * Optionally provide allowed separators that should be included in words.
-	 *
-	 * The default would look like this:
-	 * /(-?\d*\.\d\w*)|([^\`\~\!\@\#\$\%\^\&\*\(\)\-\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\?\s]+)/g
-	 */
-	public static createWordRegExp(allowInWords:string = ''): RegExp {
-		var usualSeparators = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
-		var source = '(-?\\d*\\.\\d\\w*)|([^';
-		for (var i = 0; i < usualSeparators.length; i++) {
-			if (allowInWords.indexOf(usualSeparators[i]) >= 0) {
-				continue;
-			}
-			source += '\\' + usualSeparators[i];
-		}
-		source += '\\s]+)';
-		return new RegExp(source, 'g');
-	}
-
-	// catches numbers (including floating numbers) in the first group, and alphanum in the second
-	static DEFAULT_WORD_REGEXP = NullMode.createWordRegExp();
 
 	public static ID = 'vs.editor.modes.nullMode';
 
-	public tokenTypeClassificationSupport: Modes.ITokenTypeClassificationSupport;
-
 	constructor() {
-		this.tokenTypeClassificationSupport = this;
 	}
 
 	public getId():string {
 		return NullMode.ID;
 	}
 
-	public getWordDefinition():RegExp {
-		return NullMode.DEFAULT_WORD_REGEXP;
+	public toSimplifiedMode(): modes.IMode {
+		return this;
 	}
 }
 
-export function nullTokenize(mode: Modes.IMode, buffer:string, state: Modes.IState, deltaOffset:number = 0, stopAtOffset?:number): Modes.ILineTokens {
-	var tokens:Modes.IToken[] = [
+export function nullTokenize(mode: modes.IMode, buffer:string, state: modes.IState, deltaOffset:number = 0, stopAtOffset?:number): modes.ILineTokens {
+	var tokens:modes.IToken[] = [
 		{
 			startIndex: deltaOffset,
-			type: '',
-			bracket: Modes.Bracket.None
+			type: ''
 		}
 	];
 
-	var modeTransitions:Modes.IModeTransition[] = [
+	var modeTransitions:modes.IModeTransition[] = [
 		{
 			startIndex: deltaOffset,
 			mode: mode

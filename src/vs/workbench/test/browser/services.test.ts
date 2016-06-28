@@ -9,33 +9,41 @@ import * as assert from 'assert';
 import {Promise, TPromise} from 'vs/base/common/winjs.base';
 import paths = require('vs/base/common/paths');
 import URI from 'vs/base/common/uri';
-import {create} from 'vs/platform/instantiation/common/instantiationService';
+import {IRequestService} from 'vs/platform/request/common/request';
+import {IModelService} from 'vs/editor/common/services/modelService';
+import {IModeService} from 'vs/editor/common/services/modeService';
+import {IWorkspaceContextService} from 'vs/platform/workspace/common/workspace';
+import {IStorageService} from 'vs/platform/storage/common/storage';
+import {IConfigurationService} from 'vs/platform/configuration/common/configuration';
+import {ILifecycleService, NullLifecycleService} from 'vs/platform/lifecycle/common/lifecycle';
+import {IFileService} from 'vs/platform/files/common/files';
+import {ServiceCollection} from 'vs/platform/instantiation/common/serviceCollection';
+import {InstantiationService} from 'vs/platform/instantiation/common/instantiationService';
+import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
+import PartService = require('vs/workbench/services/part/common/partService');
 import {BaseEditor} from 'vs/workbench/browser/parts/editor/baseEditor';
 import {EditorInput, EditorOptions, TextEditorOptions} from 'vs/workbench/common/editor';
-import {StringEditorInput} from 'vs/workbench/browser/parts/editor/stringEditorInput';
-import {StringEditorModel} from 'vs/workbench/browser/parts/editor/stringEditorModel';
+import {StringEditorInput} from 'vs/workbench/common/editor/stringEditorInput';
+import {StringEditorModel} from 'vs/workbench/common/editor/stringEditorModel';
 import {FileEditorInput} from 'vs/workbench/parts/files/browser/editors/fileEditorInput';
-import {TextFileEditorModel} from 'vs/workbench/parts/files/browser/editors/textFileEditorModel';
-import {TextFileService} from 'vs/workbench/parts/files/browser/textFileServices';
-import {TestEventService, TestPartService, TestStorageService, TestRequestService, TestContextService, TestWorkspace, TestEditorService, MockRequestService} from 'vs/workbench/test/browser/servicesTestUtils';
+import {TextFileEditorModel} from 'vs/workbench/parts/files/common/editors/textFileEditorModel';
+import {ITextFileService} from 'vs/workbench/parts/files/common/files';
+import {TestTextFileService, TestEventService, TestPartService, TestStorageService, TestConfigurationService, TestRequestService, TestContextService, TestWorkspace, TestEditorService, MockRequestService} from 'vs/workbench/test/common/servicesTestUtils';
 import {Viewlet} from 'vs/workbench/browser/viewlet';
-import {EventType} from 'vs/workbench/browser/events';
-import {MainTelemetryService} from 'vs/platform/telemetry/browser/mainTelemetryService';
-import Severity from 'vs/base/common/severity';
-import {UntitledEditorService} from 'vs/workbench/services/untitled/browser/untitledEditorService';
-import {WorkbenchProgressService} from 'vs/workbench/services/progress/browser/progressService';
-import {ScopedService} from 'vs/workbench/browser/services';
-import {EditorArrangement} from 'vs/workbench/services/editor/common/editorService';
+import {EventType} from 'vs/workbench/common/events';
+import {ITelemetryService, NullTelemetryService} from 'vs/platform/telemetry/common/telemetry';
+import {IUntitledEditorService, UntitledEditorService} from 'vs/workbench/services/untitled/common/untitledEditorService';
+import {WorkbenchProgressService, ScopedService} from 'vs/workbench/services/progress/browser/progressService';
 import {DelegatingWorkbenchEditorService, WorkbenchEditorService, IEditorPart} from 'vs/workbench/services/editor/browser/editorService';
 import {IViewletService} from 'vs/workbench/services/viewlet/common/viewletService';
 import {IViewlet} from 'vs/workbench/common/viewlet';
-import {Position, IEditor} from 'vs/platform/editor/common/editor';
+import {Position, Direction, IEditor} from 'vs/platform/editor/common/editor';
 import {IEventService} from 'vs/platform/event/common/event';
 import {createMockModeService, createMockModelService} from 'vs/editor/test/common/servicesTestUtils';
 
 let activeViewlet: Viewlet = <any>{};
 let activeEditor: BaseEditor = <any>{
-	getSelection: function() {
+	getSelection: function () {
 		return 'test.selection';
 	}
 };
@@ -55,12 +63,24 @@ class TestEditorPart implements IEditorPart {
 		return null;
 	}
 
-	public setEditors(inputs: EditorInput[]): Promise {
-		return Promise.as([]);
+	public openEditors(args: any[]): Promise {
+		return TPromise.as([]);
 	}
 
-	public closeEditors(othersOnly?: boolean): Promise {
-		return Promise.as(null);
+	public replaceEditors(editors: { toReplace: EditorInput, replaceWith: EditorInput, options?: any }[]): TPromise<IEditor[]> {
+		return TPromise.as([]);
+	}
+
+	public closeEditors(position: Position, except?: EditorInput, direction?: Direction): TPromise<void> {
+		return TPromise.as(null);
+	}
+
+	public closeAllEditors(except?: Position): TPromise<void> {
+		return TPromise.as(null);
+	}
+
+	public closeEditor(position: Position, input: EditorInput): TPromise<void> {
+		return TPromise.as(null);
 	}
 
 	public openEditor(input?: EditorInput, options?: EditorOptions, sideBySide?: boolean): TPromise<BaseEditor>;
@@ -70,7 +90,7 @@ class TestEditorPart implements IEditorPart {
 		openedEditorOptions = options;
 		openedEditorPosition = arg;
 
-		return Promise.as(activeEditor);
+		return TPromise.as(activeEditor);
 	}
 
 	public getActiveEditor(): BaseEditor {
@@ -88,20 +108,12 @@ class TestEditorPart implements IEditorPart {
 	public getVisibleEditors(): IEditor[] {
 		return [activeEditor];
 	}
-
-	public moveEditor(from: Position, to: Position) {
-		// Unsupported
-	}
-
-	public arrangeEditors(arrangement: EditorArrangement): void {
-		// Unsuported
-	}
 }
 
 class TestViewletService implements IViewletService {
 	public serviceId = IViewletService;
 	public openViewlet(id: string, focus?: boolean): Promise {
-		return Promise.as(null);
+		return TPromise.as(null);
 	}
 
 	public getActiveViewlet(): IViewlet {
@@ -138,14 +150,14 @@ class TestProgressBar {
 	}
 
 	public infinite() {
-		delete this.fDone;
+		this.fDone = null;
 		this.fInfinite = true;
 
 		return this;
 	}
 
 	public total(total: number) {
-		delete this.fDone;
+		this.fDone = null;
 		this.fTotal = total;
 
 		return this;
@@ -156,7 +168,7 @@ class TestProgressBar {
 	}
 
 	public worked(worked: number) {
-		delete this.fDone;
+		this.fDone = null;
 
 		if (this.fWorked) {
 			this.fWorked += worked;
@@ -170,9 +182,9 @@ class TestProgressBar {
 	public done() {
 		this.fDone = true;
 
-		delete this.fInfinite;
-		delete this.fWorked;
-		delete this.fTotal;
+		this.fInfinite = null;
+		this.fWorked = null;
+		this.fTotal = null;
 
 		return this;
 	}
@@ -183,43 +195,64 @@ class TestProgressBar {
 
 	public getContainer() {
 		return {
-			show: function() { },
-			hide: function() { }
+			show: function () { },
+			hide: function () { }
 		};
 	}
 }
 
 suite('Workbench UI Services', () => {
 
-	test('WorkbenchEditorService', function() {
+	test('WorkbenchEditorService', function () {
 		const TestFileService = {
-			resolveContent: function(resource) {
-				return Promise.as({
+			resolveContent: function (resource) {
+				return TPromise.as({
 					resource: resource,
 					value: 'Hello Html',
 					etag: 'index.txt',
 					mime: 'text/plain',
-					charset: 'utf8',
+					encoding: 'utf8',
 					mtime: new Date().getTime(),
 					name: paths.basename(resource.fsPath)
 				});
 			},
 
-			updateContent: function(res) {
-				return Promise.timeout(1).then(() => {
+			resolveStreamContent: function (resource) {
+				return TPromise.as({
+					resource: resource,
+					value: {
+						on: (event:string, callback:Function): void => {
+							if (event === 'data') {
+								callback('Hello Html');
+							}
+							if (event === 'end') {
+								callback();
+							}
+						}
+					},
+					etag: 'index.txt',
+					mime: 'text/plain',
+					encoding: 'utf8',
+					mtime: new Date().getTime(),
+					name: paths.basename(resource.fsPath)
+				});
+			},
+
+			updateContent: function (res) {
+				return TPromise.timeout(1).then(() => {
 					return {
 						resource: res,
 						etag: 'index.txt',
 						mime: 'text/plain',
-						charset: 'utf8',
+						encoding: 'utf8',
 						mtime: new Date().getTime(),
 						name: paths.basename(res.fsPath)
 					};
 				});
 			}
-		}
+		};
 
-		let editorService = new TestEditorService(function() { });
+		let editorService = new TestEditorService(function () { });
 		let eventService = new TestEventService();
 		let contextService = new TestContextService(TestWorkspace);
 		let requestService = new MockRequestService(TestWorkspace, (url) => {
@@ -236,23 +269,25 @@ suite('Workbench UI Services', () => {
 
 			return null;
 		});
-		let telemetryService = new MainTelemetryService();
+		let telemetryService = NullTelemetryService;
 
-		let services = {
-			eventService: eventService,
-			contextService: contextService,
-			requestService: requestService,
-			telemetryService: telemetryService,
-			untitledEditorService: new UntitledEditorService(),
-			storageService: new TestStorageService(),
-			editorService: editorService,
-			partService: new TestPartService(),
-			modeService: createMockModeService(),
-			modelService: createMockModelService(),
-			fileService: TestFileService
-		};
-		let inst = create(services);
+		let services = new ServiceCollection();
+		let inst = new InstantiationService(services);
+		services.set(IEventService, eventService);
+		services.set(IWorkspaceContextService, contextService);
+		services.set(IRequestService, requestService);
+		services.set(ITelemetryService, telemetryService);
+		services.set(IConfigurationService, new TestConfigurationService());
+		services.set(IUntitledEditorService, inst.createInstance(UntitledEditorService));
+		services.set(IStorageService, new TestStorageService());
+		services.set(IWorkbenchEditorService, editorService);
+		services.set(PartService.IPartService, new TestPartService());
+		services.set(IModeService, createMockModeService());
+		services.set(IModelService, createMockModelService());
+		services.set(ILifecycleService, NullLifecycleService);
+		services.set(IFileService, <any> TestFileService);
 
+		services.set(ITextFileService, <ITextFileService>inst.createInstance(<any>TestTextFileService));
 		services['instantiationService'] = inst;
 
 		let activeInput: EditorInput = inst.createInstance(FileEditorInput, toResource('/something.js'), 'text/javascript', void 0);
@@ -260,7 +295,6 @@ suite('Workbench UI Services', () => {
 		let testEditorPart = new TestEditorPart();
 		testEditorPart.setActiveEditorInput(activeInput);
 		let service: WorkbenchEditorService = <any>inst.createInstance(<any>WorkbenchEditorService, testEditorPart);
-		service.setInstantiationService(inst);
 
 		assert.strictEqual(service.getActiveEditor(), activeEditor);
 		assert.strictEqual(service.getActiveEditorInput(), activeInput);
@@ -301,7 +335,6 @@ suite('Workbench UI Services', () => {
 		service.resolveEditorModel(input, true).then((model: StringEditorModel) => {
 			assert(model instanceof StringEditorModel);
 
-			let stringEditorModel = <StringEditorModel>model;
 			assert(model.isResolved());
 
 			service.resolveEditorModel(input, false).then((otherModel) => {
@@ -315,52 +348,34 @@ suite('Workbench UI Services', () => {
 		service.resolveEditorModel({ resource: toResource('/index.html'), mime: 'text/html' }, true).then((model) => {
 			assert(model instanceof TextFileEditorModel);
 		});
-
-		// Focus editor
-		service.focusEditor().then((editor) => {
-			assert.strictEqual(editor, activeEditor);
-		});
-
-		// Close editor
-		service.closeEditor().then((editor) => {
-			assert.strictEqual(editor, activeEditor);
-		});
-
-		service.openEditor(null, null).then((editor) => {
-			assert.strictEqual(editor, activeEditor);
-		});
 	});
 
-	test('DelegatingWorkbenchEditorService', function() {
-		let editorService = new TestEditorService(function() { });
+	test('DelegatingWorkbenchEditorService', function () {
+		let editorService = new TestEditorService(function () { });
 		let contextService = new TestContextService(TestWorkspace);
 		let eventService = new TestEventService();
 		let requestService = new TestRequestService();
-		let telemetryService = new MainTelemetryService();
+		let telemetryService = NullTelemetryService;
 
-		let services = {
-			eventService: eventService,
-			contextService: contextService,
-			requestService: requestService,
-			telemetryService: telemetryService,
-			storageService: new TestStorageService(),
-			untitledEditorService: new UntitledEditorService(),
-			editorService: editorService,
-			partService: new TestPartService(),
-			modelService: createMockModelService()
-		};
-
-		let inst = create(services);
-		let textFileService = inst.createInstance(<any>TextFileService);
-		services['textFileService'] = textFileService;
-		services['instantiationService'] = inst;
-		inst.registerService('textFileService', textFileService);
+		let services = new ServiceCollection();
+		let inst = new InstantiationService(services);
+		services.set(IEventService, eventService);
+		services.set(IWorkspaceContextService, contextService);
+		services.set(IRequestService, requestService);
+		services.set(ITelemetryService, telemetryService);
+		services.set(IStorageService, new TestStorageService());
+		services.set(IUntitledEditorService, inst.createInstance(UntitledEditorService));
+		services.set(IWorkbenchEditorService, editorService);
+		services.set(PartService.IPartService, new TestPartService());
+		services.set(ILifecycleService, NullLifecycleService);
+		services.set(IConfigurationService, new TestConfigurationService());
+		services.set(ITextFileService, <ITextFileService> inst.createInstance(<any>TestTextFileService));
 		let activeInput: EditorInput = inst.createInstance(FileEditorInput, toResource('/something.js'), 'text/javascript', void 0);
 
 		let testEditorPart = new TestEditorPart();
 		testEditorPart.setActiveEditorInput(activeInput);
 
-		let service = inst.createInstance(<any>WorkbenchEditorService, testEditorPart);
+		inst.createInstance(<any>WorkbenchEditorService, testEditorPart);
 		class MyEditor extends BaseEditor {
 
 			constructor(id: string) {
@@ -368,7 +383,7 @@ suite('Workbench UI Services', () => {
 			}
 
 			getId(): string {
-				return "myEditor";
+				return 'myEditor';
 			}
 
 			public layout(): void {
@@ -382,38 +397,28 @@ suite('Workbench UI Services', () => {
 		let ed = inst.createInstance(MyEditor, 'my.editor');
 
 		let inp = inst.createInstance(StringEditorInput, 'name', 'description', 'hello world', 'text/plain', false);
-		let delegate: any = inst.createInstance(<any>DelegatingWorkbenchEditorService, ed, (editor: BaseEditor, input: EditorInput, options?: EditorOptions) => {
+		let delegate: any = inst.createInstance(<any>DelegatingWorkbenchEditorService, (input: EditorInput, options?: EditorOptions, arg3?: any) => {
 			assert.strictEqual(input, inp);
-			assert.strictEqual(editor, ed);
 
-			return TPromise.as(true);
+			return TPromise.as(ed);
 		});
 
 		delegate.openEditor(inp);
 	});
 
-	test('ScopedService', function() {
+	test('ScopedService', function () {
 		let eventService = new TestEventService();
 		let service = new TestScopedService(eventService);
 		assert(!service.isActive);
 
-		eventService.emit(EventType.EDITOR_OPENED, { editorId: 'other.test.scopeId' });
-		assert(!service.isActive);
-
-		eventService.emit(EventType.EDITOR_OPENED, { editorId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_OPENED, { compositeId: 'test.scopeId' });
 		assert(service.isActive);
 
-		eventService.emit(EventType.EDITOR_CLOSED, { editorId: 'test.scopeId' });
-		assert(!service.isActive);
-
-		eventService.emit(EventType.VIEWLET_OPENED, { viewletId: 'test.scopeId' });
-		assert(service.isActive);
-
-		eventService.emit(EventType.VIEWLET_CLOSED, { viewletId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_CLOSED, { compositeId: 'test.scopeId' });
 		assert(!service.isActive);
 	});
 
-	test('WorkbenchProgressService', function() {
+	test('WorkbenchProgressService', function () {
 		let testProgressBar = new TestProgressBar();
 		let eventService = new TestEventService();
 		let service = new WorkbenchProgressService(eventService, (<any>testProgressBar), 'test.scopeId', true);
@@ -436,33 +441,33 @@ suite('Workbench UI Services', () => {
 		assert.strictEqual(true, testProgressBar.fDone);
 
 		// Inactive: Show (Infinite)
-		eventService.emit(EventType.EDITOR_CLOSED, { editorId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_CLOSED, { compositeId: 'test.scopeId' });
 		service.show(true);
 		assert.strictEqual(false, !!testProgressBar.fInfinite);
-		eventService.emit(EventType.EDITOR_OPENED, { editorId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_OPENED, { compositeId: 'test.scopeId' });
 		assert.strictEqual(true, testProgressBar.fInfinite);
 
 		// Inactive: Show (Total / Worked)
-		eventService.emit(EventType.EDITOR_CLOSED, { editorId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_CLOSED, { compositeId: 'test.scopeId' });
 		fn = service.show(100);
 		fn.total(80);
 		fn.worked(20);
 		assert.strictEqual(false, !!testProgressBar.fTotal);
-		eventService.emit(EventType.EDITOR_OPENED, { editorId: 'test.scopeId' });
+		eventService.emit(EventType.COMPOSITE_OPENED, { compositeId: 'test.scopeId' });
 		assert.strictEqual(20, testProgressBar.fWorked);
 		assert.strictEqual(80, testProgressBar.fTotal);
 
 		// Acive: Show While
-		let p = Promise.as(null);
+		let p = TPromise.as(null);
 		service.showWhile(p).then(() => {
 			assert.strictEqual(true, testProgressBar.fDone);
 
-			eventService.emit(EventType.EDITOR_CLOSED, { editorId: 'test.scopeId' });
-			p = Promise.as(null);
+			eventService.emit(EventType.COMPOSITE_CLOSED, { compositeId: 'test.scopeId' });
+			p = TPromise.as(null);
 			service.showWhile(p).then(() => {
 				assert.strictEqual(true, testProgressBar.fDone);
 
-				eventService.emit(EventType.EDITOR_OPENED, { editorId: 'test.scopeId' });
+				eventService.emit(EventType.COMPOSITE_OPENED, { compositeId: 'test.scopeId' });
 				assert.strictEqual(true, testProgressBar.fDone);
 			});
 		});

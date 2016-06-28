@@ -4,26 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import winjs = require('vs/base/common/winjs.base');
-import marshalling = require('vs/base/common/marshalling');
-import remote = require('vs/base/common/remote');
-
 /**
- * A message sent from the UI thread to a worker 
+ * A message sent from the UI thread to a worker
  */
 export interface IClientMessage {
 	id:number;
 	type:string;
 	timestamp:number;
 	payload:any;
-}
-
-/**
- * A message sent from the UI thread in reply to a worker
- */
-export interface IClientReplyMessage extends IClientMessage {
-	seq:string;
-	err:any;
 }
 
 /**
@@ -71,45 +59,3 @@ export var PrintType = {
 	WARN: 'warn',
 	ERROR: 'error'
 };
-
-export interface IRequester {
-	request(requestName: string, payload: any): winjs.Promise;
-}
-
-export class RemoteCom implements remote.IRemoteCom {
-	
-	private _requester: IRequester;
-	private _bigHandler: remote.IManyHandler;
-	
-	constructor(requester:IRequester) {
-		this._requester = requester;
-		this._bigHandler = null;
-	}
-	
-	public callOnRemote(proxyId: string, path: string, args:any[]): winjs.Promise {
-		return this._requester.request('_proxyObj', {
-			proxyId: proxyId,
-			path: path,
-			args: args
-		});
-	}
-	
-	public registerBigHandler(handler:remote.IManyHandler): void {
-		this._bigHandler = handler;
-	}
-	
-	public handleMessage(msg: { proxyId: string; path: string; args: any[]; }): winjs.Promise {
-		if (!this._bigHandler) {
-			throw new Error('got message before big handler attached!');
-		}
-		return this._invokeHandler(msg.proxyId, msg.path, msg.args);
-	}
-	
-	private _invokeHandler(rpcId:string, method:string, args:any[]): winjs.Promise {
-		try {
-			return winjs.TPromise.as(this._bigHandler.handle(rpcId, method, args));
-		} catch (err) {
-			return winjs.Promise.wrapError(err);
-		}
-	}
-}

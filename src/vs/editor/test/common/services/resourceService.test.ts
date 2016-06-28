@@ -4,31 +4,30 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import assert = require('assert');
-import Network = require('vs/base/common/network');
-import Emit = require('vs/base/common/eventEmitter');
-import Service = require('vs/editor/common/services/resourceServiceImpl');
-import MirrorModel = require('vs/editor/common/model/mirrorModel');
-import resourceService = require('vs/editor/common/services/resourceService');
+import * as assert from 'assert';
+import URI from 'vs/base/common/uri';
+import {createTestMirrorModelFromString} from 'vs/editor/common/model/mirrorModel';
+import {ResourceEvents} from 'vs/editor/common/services/resourceService';
+import {ResourceService} from 'vs/editor/common/services/resourceServiceImpl';
 
 suite('Editor Services - ResourceService', () => {
 
 	test('insert, remove, all', () => {
 
-		var service = new Service.ResourceService();
+		var service = new ResourceService();
 
-		service.insert(new Network.URL('test://1'), MirrorModel.createMirrorModelFromString(null, 1, 'hi', null));
+		service.insert(URI.parse('test://1'), createTestMirrorModelFromString('hi'));
 		assert.equal(service.all().length, 1);
 
-		service.insert(new Network.URL('test://2'), MirrorModel.createMirrorModelFromString(null, 1, 'hi', null));
+		service.insert(URI.parse('test://2'), createTestMirrorModelFromString('hi'));
 		assert.equal(service.all().length, 2);
 
-		assert.ok(service.contains(new Network.URL('test://1')));
-		assert.ok(service.contains(new Network.URL('test://2')));
+		assert.ok(service.contains(URI.parse('test://1')));
+		assert.ok(service.contains(URI.parse('test://2')));
 
-		service.remove(new Network.URL('test://1'));
-		service.remove(new Network.URL('test://1'));
-		service.remove(new Network.URL('test://2'));
+		service.remove(URI.parse('test://1'));
+		service.remove(URI.parse('test://1'));
+		service.remove(URI.parse('test://2'));
 		assert.equal(service.all().length, 0);
 	});
 
@@ -37,14 +36,14 @@ suite('Editor Services - ResourceService', () => {
 
 		var eventCnt = 0;
 
-		var url = new Network.URL('far');
-		var element = MirrorModel.createMirrorModelFromString(null, 1, 'hi', null);
-		var service = new Service.ResourceService();
-		service.addListener(resourceService.ResourceEvents.ADDED, () => {
+		var url = URI.parse('far');
+		var element = createTestMirrorModelFromString('hi');
+		var service = new ResourceService();
+		service.addListener2(ResourceEvents.ADDED, () => {
 			eventCnt++;
 			assert.ok(true);
 		});
-		service.addListener(resourceService.ResourceEvents.REMOVED, () => {
+		service.addListener2(ResourceEvents.REMOVED, () => {
 			eventCnt++;
 			assert.ok(true);
 		});
@@ -58,14 +57,14 @@ suite('Editor Services - ResourceService', () => {
 
 		var eventCnt = 0;
 
-		var url = new Network.URL('far');
-		var element = MirrorModel.createMirrorModelFromString(null, 1, 'hi', null);
+		var url = URI.parse('far');
+		var element = createTestMirrorModelFromString('hi');
 		var event = {};
 
-		var service = new Service.ResourceService();
+		var service = new ResourceService();
 		service.insert(url, element);
 
-		service.addBulkListener((events) => {
+		service.addBulkListener2((events) => {
 			eventCnt++;
 			assert.equal(events.length, 1);
 			assert.equal(events[0].getData().originalEvents.length, 1);

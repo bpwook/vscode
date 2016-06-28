@@ -4,26 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import modes = require('vs/editor/common/modes');
 import {Arrays} from 'vs/editor/common/core/arrays';
-
-export function createMockMode(id:string, wordRegExp:RegExp = null):modes.IMode {
-	var tokenTypeClassificationSupport: modes.ITokenTypeClassificationSupport;
-	if (wordRegExp) {
-		tokenTypeClassificationSupport = {
-			getWordDefinition: () => wordRegExp
-		};
-	}
-	return {
-		getId: () => id,
-		tokenTypeClassificationSupport: tokenTypeClassificationSupport
-	};
-}
+import * as modes from 'vs/editor/common/modes';
+import {ModeTransition} from 'vs/editor/common/core/modeTransition';
 
 export interface TokenText {
 	text: string;
 	type: string;
-	bracket?: modes.Bracket;
 }
 
 export function createLineContextFromTokenText(tokens: TokenText[]): modes.ILineContext {
@@ -32,7 +19,7 @@ export function createLineContextFromTokenText(tokens: TokenText[]): modes.ILine
 
 	var indexSoFar = 0;
 	for (var i = 0; i < tokens.length; ++i){
-		processedTokens.push({ startIndex: indexSoFar, type: tokens[i].type, bracket: (tokens[i].bracket ? tokens[i].bracket : modes.Bracket.None) });
+		processedTokens.push({ startIndex: indexSoFar, type: tokens[i].type });
 		line += tokens[i].text;
 		indexSoFar += tokens[i].text.length;
 	}
@@ -40,17 +27,17 @@ export function createLineContextFromTokenText(tokens: TokenText[]): modes.ILine
 	return new TestLineContext(line, processedTokens, null);
 }
 
-export function createLineContext(line:string, tokens:modes.ILineTokens): modes.ILineContext {
-	return new TestLineContext(line, tokens.tokens, tokens.modeTransitions);
+export function createMockLineContext(line:string, tokens:modes.ILineTokens): modes.ILineContext {
+	return new TestLineContext(line, tokens.tokens, ModeTransition.create(tokens.modeTransitions));
 }
 
 class TestLineContext implements modes.ILineContext {
 
-	public modeTransitions: modes.IModeTransition[];
+	public modeTransitions: ModeTransition[];
 	private _line:string;
 	private _tokens: modes.IToken[];
 
-	constructor(line:string, tokens: modes.IToken[], modeTransitions:modes.IModeTransition[]) {
+	constructor(line:string, tokens: modes.IToken[], modeTransitions:ModeTransition[]) {
 		this.modeTransitions = modeTransitions;
 		this._line = line;
 		this._tokens = tokens;
@@ -77,10 +64,6 @@ class TestLineContext implements modes.ILineContext {
 
 	public getTokenType(tokenIndex:number): string {
 		return this._tokens[tokenIndex].type;
-	}
-
-	public getTokenBracket(tokenIndex:number): modes.Bracket {
-		return this._tokens[tokenIndex].bracket;
 	}
 
 	public findIndexOfOffset(offset:number): number {

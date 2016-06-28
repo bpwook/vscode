@@ -1,7 +1,8 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 'use strict';
 
 import { CancellationToken, Uri } from 'vscode';
@@ -17,7 +18,9 @@ export interface ITypescriptServiceClient {
 	asAbsolutePath(resource: Uri): string;
 	asUrl(filepath: string): Uri;
 
-	trace: boolean;
+	logTelemetry(eventName: string, properties?: { [prop: string]: string });
+
+	experimentalAutoBuild: boolean;
 
 	execute(command:'configure', args: Proto.ConfigureRequestArguments, token?: CancellationToken):Promise<Proto.ConfigureResponse>;
 	execute(command:'open', args: Proto.OpenRequestArgs, expectedResult:boolean, token?: CancellationToken):Promise<any>;

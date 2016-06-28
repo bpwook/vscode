@@ -102,7 +102,7 @@ export class Emitter<T> {
 	 * To be kept private to fire an event to
 	 * subscribers
 	 */
-	fire(event: T): any {
+	fire(event?: T): any {
 		if (this._callbacks) {
 			this._callbacks.invoke.call(this._callbacks, event);
 		}
@@ -119,7 +119,7 @@ export class Emitter<T> {
 
 /**
  * Creates an Event which is backed-up by the event emitter. This allows
- * to use the existing eventing pattern and is likely using less memeory.
+ * to use the existing eventing pattern and is likely using less memory.
  * Sample:
  *
  * 	class Document {
@@ -149,4 +149,89 @@ export function fromEventEmitter<T>(emitter: EventEmitter, eventType: string): E
 		}
 		return result;
 	};
+}
+
+export function mapEvent<I,O>(event: Event<I>, map: (i:I)=>O): Event<O> {
+	return (listener, thisArgs = null, disposables?) => event(i => listener.call(thisArgs, map(i)), null, disposables);
+}
+
+export function filterEvent<T>(event: Event<T>, filter: (e:T)=>boolean): Event<T> {
+	return (listener, thisArgs = null, disposables?) => event(e => filter(e) && listener.call(thisArgs, e), null, disposables);
+}
+
+export function debounceEvent<I, O>(event: Event<I>, merger: (last: O, event: I) => O, delay: number = 100): Event<O> {
+
+	let subscription: IDisposable;
+	let output: O;
+	let handle: number;
+
+	const emitter = new Emitter<O>({
+		onFirstListenerAdd() {
+			subscription = event(cur => {
+				output = merger(output, cur);
+				clearTimeout(handle);
+				handle = setTimeout(() => {
+					emitter.fire(output);
+					output = undefined;
+				}, delay);
+			});
+		},
+		onLastListenerRemove() {
+			subscription.dispose();
+		}
+	});
+
+	return emitter.event;
+}
+
+enum EventDelayerState {
+	Idle,
+	Running
+}
+
+/**
+ * The EventDelayer is useful in situations in which you want
+ * to delay firing your events during some code.
+ * You can wrap that code and be sure that the event will not
+ * be fired during that wrap.
+ *
+ * ```
+ * const emitter: Emitter;
+ * const delayer = new EventDelayer();
+ * const delayedEvent = delayer.delay(emitter.event);
+ *
+ * delayedEvent(console.log);
+ *
+ * delayer.wrap(() => {
+ *   emitter.fire(); // event will not be fired yet
+ * });
+ *
+ * // event will only be fired at this point
+ * ```
+ */
+export class EventBufferer {
+
+	private buffers: Function[][] = [];
+
+	wrapEvent<T>(event: Event<T>): Event<T> {
+		return (listener, thisArgs?, disposables?) => {
+			return event(i => {
+				const buffer = this.buffers[this.buffers.length - 1];
+
+				if (buffer) {
+					buffer.push(() => listener.call(thisArgs, i));
+				} else {
+					listener.call(thisArgs, i);
+				}
+			}, void 0, disposables);
+		};
+	}
+
+	bufferEvents(fn: () => void): void {
+		const buffer = [];
+		this.buffers.push(buffer);
+		fn();
+		this.buffers.pop();
+		buffer.forEach(flush => flush());
+	}
 }

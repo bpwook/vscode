@@ -5,8 +5,7 @@
 'use strict';
 
 import nls = require('vs/nls');
-import {Promise} from 'vs/base/common/winjs.base';
-import {IDisposable} from 'vs/base/common/lifecycle';
+import {TPromise} from 'vs/base/common/winjs.base';
 import Severity from 'vs/base/common/severity';
 import {createDecorator, ServiceIdentifier} from 'vs/platform/instantiation/common/instantiation';
 import {Action} from 'vs/base/common/actions';
@@ -24,10 +23,10 @@ export interface IConfirmation {
 	secondaryButton?: string;
 }
 
-export var CloseAction = new Action('close.message', nls.localize('close', "Close"), null, true, () => Promise.as(true));
-export var CancelAction = new Action('close.message', nls.localize('cancel', "Cancel"), null, true, () => Promise.as(true));
+export const CloseAction = new Action('close.message', nls.localize('close', "Close"), null, true, () => TPromise.as(true));
+export const CancelAction = new Action('close.message', nls.localize('cancel', "Cancel"), null, true, () => TPromise.as(true));
 
-export var IMessageService = createDecorator<IMessageService>('messageService');
+export const IMessageService = createDecorator<IMessageService>('messageService');
 
 export interface IMessageService {
 	serviceId: ServiceIdentifier<any>;
@@ -41,11 +40,6 @@ export interface IMessageService {
 	show(sev: Severity, message: string[]): () => void;
 	show(sev: Severity, message: Error[]): () => void;
 	show(sev: Severity, message: IMessageWithAction): () => void;
-
-	/**
-	 * Prints something to the status bar area with optional auto dispose and delay.
-	 */
-	setStatusMessage(message: string, autoDisposeAfter?: number, delayBy?: number): IDisposable;
 
 	/**
 	 * Hide any messages showing currently.

@@ -4,97 +4,83 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import nls = require('vs/nls');
-import Lifecycle = require('vs/base/common/lifecycle');
-import Snippet = require('vs/editor/contrib/snippet/common/snippet');
-import SuggestWidget = require('./suggestWidget');
-import SuggestModel = require('./suggestModel');
-import Errors = require('vs/base/common/errors');
-import {TPromise} from 'vs/base/common/winjs.base';
-import {EditorBrowserRegistry} from 'vs/editor/browser/editorBrowserExtensions';
-import {CommonEditorRegistry, ContextKey, EditorActionDescriptor} from 'vs/editor/common/editorCommonExtensions';
-import {EditorAction, Behaviour} from 'vs/editor/common/editorAction';
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Modes = require('vs/editor/common/modes');
-import EventEmitter = require('vs/base/common/eventEmitter');
-import {IKeybindingService, IKeybindingContextKey} from 'vs/platform/keybinding/common/keybindingService';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {SuggestRegistry, ACCEPT_SELECTED_SUGGESTION_CMD, CONTEXT_SUGGEST_WIDGET_VISIBLE} from 'vs/editor/contrib/suggest/common/suggest';
-import {INullService} from 'vs/platform/instantiation/common/instantiation';
-import {KeyMod, KeyCode} from 'vs/base/common/keyCodes';
+import * as nls from 'vs/nls';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
+import { IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { TPromise } from 'vs/base/common/winjs.base';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { KbExpr } from 'vs/platform/keybinding/common/keybindingService';
+import { EditorAction } from 'vs/editor/common/editorAction';
+import { ICommonCodeEditor, IEditorActionDescriptorData, IEditorContribution, KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS } from 'vs/editor/common/editorCommon';
+import { CommonEditorRegistry, ContextKey, EditorActionDescriptor } from 'vs/editor/common/editorCommonExtensions';
+import { ISuggestSupport, SuggestRegistry } from 'vs/editor/common/modes';
+import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
+import { EditorBrowserRegistry } from 'vs/editor/browser/editorBrowserExtensions';
+import { getSnippetController } from 'vs/editor/contrib/snippet/common/snippet';
+import { Context as SuggestContext } from 'vs/editor/contrib/suggest/common/suggest';
+import { KeybindingsRegistry } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { withCodeEditorFromCommandHandler } from 'vs/editor/common/config/config';
+import { SuggestModel } from './suggestModel';
+import { SuggestWidget } from './suggestWidget';
 
-export class SuggestController implements EditorCommon.IEditorContribution {
-	static ID = 'editor.contrib.suggestController';
+export class SuggestController implements IEditorContribution {
+	static ID: string = 'editor.contrib.suggestController';
 
-	static getSuggestController(editor:EditorCommon.ICommonCodeEditor): SuggestController {
+	static getController(editor: ICommonCodeEditor): SuggestController {
 		return <SuggestController>editor.getContribution(SuggestController.ID);
 	}
 
-	private editor:EditorBrowser.ICodeEditor;
-	private model:SuggestModel.SuggestModel;
-	private suggestWidget: SuggestWidget.SuggestWidget;
-	private toDispose: Lifecycle.IDisposable[];
+	private model: SuggestModel;
+	private widget: SuggestWidget;
+	private triggerCharacterListeners: IDisposable[];
+	private toDispose: IDisposable[];
 
-	private triggerCharacterListeners: Function[];
-	private suggestWidgetVisible: IKeybindingContextKey<boolean>;
-
-	constructor(editor:EditorBrowser.ICodeEditor, @IKeybindingService keybindingService: IKeybindingService, @ITelemetryService telemetryService: ITelemetryService) {
-		this.editor = editor;
-		this.suggestWidgetVisible = keybindingService.createKey(CONTEXT_SUGGEST_WIDGET_VISIBLE, false);
-
-		this.model = new SuggestModel.SuggestModel(this.editor, (snippet:Snippet.CodeSnippet, overwriteBefore:number, overwriteAfter:number) => {
-			Snippet.get(this.editor).run(snippet, overwriteBefore, overwriteAfter);
-		});
-
-		this.suggestWidget = new SuggestWidget.SuggestWidget(this.editor, telemetryService, keybindingService, () => {
-			this.suggestWidgetVisible.set(true);
-		}, () => {
-			this.suggestWidgetVisible.reset();
-		});
-		this.suggestWidget.setModel(this.model);
+	constructor(
+		private editor: ICodeEditor,
+		@IInstantiationService instantiationService: IInstantiationService
+	) {
+		this.model = new SuggestModel(this.editor);
+		this.widget = instantiationService.createInstance(SuggestWidget, this.editor, this.model);
 
 		this.triggerCharacterListeners = [];
 
 		this.toDispose = [];
-		this.toDispose.push(editor.addListener2(EditorCommon.EventType.ConfigurationChanged, () => this.update()));
-		this.toDispose.push(editor.addListener2(EditorCommon.EventType.ModelChanged, () => this.update()));
-		this.toDispose.push(editor.addListener2(EditorCommon.EventType.ModelModeChanged, () => this.update()));
-		this.toDispose.push(editor.addListener2(EditorCommon.EventType.ModelModeSupportChanged, (e: EditorCommon.IModeSupportChangedEvent) => {
-			if (e.suggestSupport) {
-				this.update();
-			}
-		}));
+		this.toDispose.push(editor.onDidChangeConfiguration(() => this.update()));
+		this.toDispose.push(editor.onDidChangeModel(() => this.update()));
+		this.toDispose.push(editor.onDidChangeModelMode(() => this.update()));
 		this.toDispose.push(SuggestRegistry.onDidChange(this.update, this));
+
+		this.toDispose.push(this.model.onDidAccept(e => getSnippetController(this.editor).run(e.snippet, e.overwriteBefore, e.overwriteAfter)));
 
 		this.update();
 	}
 
-	public getId(): string {
+	getId(): string {
 		return SuggestController.ID;
 	}
 
-	public dispose(): void {
-		this.toDispose = Lifecycle.disposeAll(this.toDispose);
-		this.triggerCharacterListeners = Lifecycle.cAll(this.triggerCharacterListeners);
+	dispose(): void {
+		this.toDispose = dispose(this.toDispose);
+		this.triggerCharacterListeners = dispose(this.triggerCharacterListeners);
 
-		if (this.suggestWidget) {
-			this.suggestWidget.destroy();
-			this.suggestWidget = null;
+		if (this.widget) {
+			this.widget.dispose();
+			this.widget = null;
 		}
 		if (this.model) {
-			this.model.destroy();
+			this.model.dispose();
 			this.model = null;
 		}
 	}
 
 	private update(): void {
 
-		this.triggerCharacterListeners = Lifecycle.cAll(this.triggerCharacterListeners);
+		this.triggerCharacterListeners = dispose(this.triggerCharacterListeners);
 
 		if (this.editor.getConfiguration().readOnly
 			|| !this.editor.getModel()
-			|| !this.editor.getConfiguration().suggestOnTriggerCharacters) {
+			|| !this.editor.getConfiguration().contribInfo.suggestOnTriggerCharacters) {
 
 			return;
 		}
@@ -104,14 +90,14 @@ export class SuggestController implements EditorCommon.IEditorContribution {
 			return;
 		}
 
-		let triggerCharacters: { [ch: string]: Modes.ISuggestSupport[][] } = Object.create(null);
+		let triggerCharacters: { [ch: string]: ISuggestSupport[][] } = Object.create(null);
 
 		groups.forEach(group => {
 
-			let groupTriggerCharacters: { [ch: string]: Modes.ISuggestSupport[] } = Object.create(null);
+			let groupTriggerCharacters: { [ch: string]: ISuggestSupport[] } = Object.create(null);
 
 			group.forEach(support => {
-				let localTriggerCharacters = support.getTriggerCharacters();
+				let localTriggerCharacters = support.triggerCharacters;
 				if (localTriggerCharacters) {
 					for (let ch of localTriggerCharacters) {
 						let array = groupTriggerCharacters[ch];
@@ -138,111 +124,171 @@ export class SuggestController implements EditorCommon.IEditorContribution {
 		});
 	}
 
-	private triggerCharacterHandler(character: string, groups: Modes.ISuggestSupport[][]): void {
-		var position = this.editor.getPosition();
-		var lineContext = this.editor.getModel().getLineContext(position.lineNumber);
-		var mode: Modes.IMode = this.editor.getModel().getMode();
-
+	private triggerCharacterHandler(character: string, groups: ISuggestSupport[][]): void {
 		groups = groups.map(supports => {
-			return supports.filter(support => support.shouldAutotriggerSuggest(lineContext, position.column - 1, character));
+			return supports.filter(support => support.shouldAutotriggerSuggest);
 		});
 
 		if (groups.length > 0) {
-			this.triggerSuggest(character, groups).done(null, Errors.onUnexpectedError);
+			this.triggerSuggest(character, groups).done(null, onUnexpectedError);
 		}
 	}
 
-	public triggerSuggest(triggerCharacter?: string, groups?: Modes.ISuggestSupport[][]): TPromise<boolean> {
+	triggerSuggest(triggerCharacter?: string, groups?: ISuggestSupport[][]): TPromise<boolean> {
 		this.model.trigger(false, triggerCharacter, false, groups);
 		this.editor.focus();
 
 		return TPromise.as(false);
 	}
 
-	public acceptSelectedSuggestion(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.acceptSelectedSuggestion();
+	acceptSelectedSuggestion(): void {
+		if (this.widget) {
+			this.widget.acceptSelectedSuggestion();
 		}
 	}
 
-	public hideSuggestWidget(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.cancel();
+	cancelSuggestWidget(): void {
+		if (this.widget) {
+			this.widget.cancel();
 		}
 	}
 
-	public selectNextSuggestion(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.selectNext();
+	selectNextSuggestion(): void {
+		if (this.widget) {
+			this.widget.selectNext();
 		}
 	}
 
-	public selectNextPageSuggestion(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.selectNextPage();
+	selectNextPageSuggestion(): void {
+		if (this.widget) {
+			this.widget.selectNextPage();
 		}
 	}
 
-	public selectPrevSuggestion(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.selectPrevious();
+	selectPrevSuggestion(): void {
+		if (this.widget) {
+			this.widget.selectPrevious();
 		}
 	}
 
-	public selectPrevPageSuggestion(): void {
-		if (this.suggestWidget) {
-			this.suggestWidget.selectPreviousPage();
+	selectPrevPageSuggestion(): void {
+		if (this.widget) {
+			this.widget.selectPreviousPage();
+		}
+	}
+
+	toggleSuggestionDetails(): void {
+		if (this.widget) {
+			this.widget.toggleDetails();
 		}
 	}
 }
 
 export class TriggerSuggestAction extends EditorAction {
 
-	static ID = 'editor.action.triggerSuggest';
+	static ID: string = 'editor.action.triggerSuggest';
 
-	constructor(descriptor:EditorCommon.IEditorActionDescriptorData, editor:EditorCommon.ICommonCodeEditor, @INullService ns) {
+	constructor(descriptor: IEditorActionDescriptorData, editor: ICommonCodeEditor) {
 		super(descriptor, editor);
 	}
 
-	public isSupported(): boolean {
+	isSupported(): boolean {
 		return SuggestRegistry.has(this.editor.getModel()) && !this.editor.getConfiguration().readOnly;
 	}
 
-	public run():TPromise<boolean> {
-		return SuggestController.getSuggestController(this.editor).triggerSuggest();
+	run(): TPromise<boolean> {
+		return SuggestController.getController(this.editor).triggerSuggest();
 	}
 }
 
-var weight = CommonEditorRegistry.commandWeight(90);
+CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(
+	TriggerSuggestAction,
+	TriggerSuggestAction.ID,
+	nls.localize('suggest.trigger.label', "Trigger Suggest"),
+	{
+		context: ContextKey.EditorTextFocus,
+		primary: KeyMod.CtrlCmd | KeyCode.Space,
+		mac: { primary: KeyMod.WinCtrl | KeyCode.Space }
+	},
+	'Trigger Suggest'
+));
 
-// register action
-CommonEditorRegistry.registerEditorAction(new EditorActionDescriptor(TriggerSuggestAction, TriggerSuggestAction.ID, nls.localize('suggest.trigger.label', "Trigger Suggest"), {
-	context: ContextKey.EditorTextFocus,
+const weight = CommonEditorRegistry.commandWeight(90);
+
+function handler(id: string, fn: (controller: SuggestController) => void) {
+	return accessor => withCodeEditorFromCommandHandler(id, accessor, editor => {
+		fn(SuggestController.getController(editor));
+	});
+}
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'acceptSelectedSuggestion',
+	handler: handler('acceptSelectedSuggestion', c => c.acceptSelectedSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible)),
+	primary: KeyCode.Tab
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'acceptSelectedSuggestionOnEnter',
+	handler: handler('acceptSelectedSuggestionOnEnter', c => c.acceptSelectedSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible), KbExpr.has('config.editor.acceptSuggestionOnEnter')),
+	primary: KeyCode.Enter
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'hideSuggestWidget',
+	handler: handler('hideSuggestWidget', c => c.cancelSuggestWidget()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible)),
+	primary: KeyCode.Escape,
+	secondary: [KeyMod.Shift | KeyCode.Escape]
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'selectNextSuggestion',
+	handler: handler('selectNextSuggestion', c => c.selectNextSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible), KbExpr.has(SuggestContext.MultipleSuggestions)),
+	primary: KeyCode.DownArrow,
+	secondary: [KeyMod.Alt | KeyCode.DownArrow]
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'selectNextPageSuggestion',
+	handler: handler('selectNextPageSuggestion', c => c.selectNextPageSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible), KbExpr.has(SuggestContext.MultipleSuggestions)),
+	primary: KeyCode.PageDown,
+	secondary: [KeyMod.Alt | KeyCode.PageDown]
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'selectPrevSuggestion',
+	handler: handler('selectPrevSuggestion', c => c.selectPrevSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible), KbExpr.has(SuggestContext.MultipleSuggestions)),
+	primary: KeyCode.UpArrow,
+	secondary: [KeyMod.Alt | KeyCode.UpArrow]
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'selectPrevPageSuggestion',
+	handler: handler('selectPrevPageSuggestion', c => c.selectPrevPageSuggestion()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible), KbExpr.has(SuggestContext.MultipleSuggestions)),
+	primary: KeyCode.PageUp,
+	secondary: [KeyMod.Alt | KeyCode.PageUp]
+});
+
+KeybindingsRegistry.registerCommandDesc({
+	id: 'toggleSuggestionDetails',
+	handler: handler('toggleSuggestionDetails', c => c.toggleSuggestionDetails()),
+	weight,
+	when: KbExpr.and(KbExpr.has(KEYBINDING_CONTEXT_EDITOR_TEXT_FOCUS), KbExpr.has(SuggestContext.Visible)),
 	primary: KeyMod.CtrlCmd | KeyCode.Space,
 	mac: { primary: KeyMod.WinCtrl | KeyCode.Space }
-}));
-CommonEditorRegistry.registerEditorCommand(ACCEPT_SELECTED_SUGGESTION_CMD, weight, { primary: KeyCode.Enter, secondary:[KeyCode.Tab] }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.acceptSelectedSuggestion();
 });
-CommonEditorRegistry.registerEditorCommand('hideSuggestWidget', weight, { primary: KeyCode.Escape }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.hideSuggestWidget();
-});
-CommonEditorRegistry.registerEditorCommand('selectNextSuggestion', weight, { primary: KeyCode.DownArrow }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.selectNextSuggestion();
-});
-CommonEditorRegistry.registerEditorCommand('selectNextPageSuggestion', weight, { primary: KeyCode.PageDown }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.selectNextPageSuggestion();
-});
-CommonEditorRegistry.registerEditorCommand('selectPrevSuggestion', weight, { primary: KeyCode.UpArrow }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.selectPrevSuggestion();
-});
-CommonEditorRegistry.registerEditorCommand('selectPrevPageSuggestion', weight, { primary: KeyCode.PageUp }, true, CONTEXT_SUGGEST_WIDGET_VISIBLE, (ctx, editor, args) => {
-	var controller = SuggestController.getSuggestController(editor);
-	controller.selectPrevPageSuggestion();
-});
+
 EditorBrowserRegistry.registerEditorContribution(SuggestController);

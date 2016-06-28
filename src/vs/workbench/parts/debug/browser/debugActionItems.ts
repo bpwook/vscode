@@ -3,29 +3,31 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import nls = require('vs/nls');
 import lifecycle = require('vs/base/common/lifecycle');
 import errors = require('vs/base/common/errors');
-import { Promise } from 'vs/base/common/winjs.base';
+import { TPromise } from 'vs/base/common/winjs.base';
 import dom = require('vs/base/browser/dom');
-import actions = require('vs/base/common/actions');
-import actionbar = require('vs/base/browser/ui/actionbar/actionbar');
-import { IDebugService, ServiceEvents, State } from 'vs/workbench/parts/debug/common/debug';
-import { IConfigurationService, ConfigurationServiceEventTypes } from 'vs/platform/configuration/common/configuration';
+import { isWindows } from 'vs/base/common/platform';
+import { IAction } from 'vs/base/common/actions';
+import { BaseActionItem } from 'vs/base/browser/ui/actionbar/actionbar';
+import { IDebugService, State } from 'vs/workbench/parts/debug/common/debug';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 
-export class SelectConfigActionItem extends actionbar.BaseActionItem {
+export class SelectConfigActionItem extends BaseActionItem {
 
 	private select: HTMLSelectElement;
 	private toDispose: lifecycle.IDisposable[];
 
 	constructor(
-		action: actions.IAction,
+		action: IAction,
 		@IDebugService private debugService: IDebugService,
 		@IConfigurationService configurationService: IConfigurationService
 	) {
 		super(null, action);
 
 		this.select = document.createElement('select');
-		this.select.className = 'debug-select action-bar-select';
+		this.select.className = `debug-select action-bar-select ${isWindows ? 'windows' : ''}`;
 
 		this.toDispose = [];
 		this.registerListeners(configurationService);
@@ -35,38 +37,54 @@ export class SelectConfigActionItem extends actionbar.BaseActionItem {
 		this.toDispose.push(dom.addStandardDisposableListener(this.select, 'change', (e) => {
 			this.actionRunner.run(this._action, e.target.value).done(null, errors.onUnexpectedError);
 		}));
-		this.toDispose.push(this.debugService.addListener2(ServiceEvents.STATE_CHANGED, () => {
-			this.select.disabled = this.debugService.getState() !== State.Inactive;
+		this.toDispose.push(this.debugService.onDidChangeState(state => {
+			this.select.disabled = state !== State.Inactive;
 		}));
-		this.toDispose.push(configurationService.addListener2(ConfigurationServiceEventTypes.UPDATED, e  => {
-			this.setOptions().done(null, errors.onUnexpectedError);
+		this.toDispose.push(configurationService.onDidUpdateConfiguration(e => {
+			this.setOptions(true).done(null, errors.onUnexpectedError);
+		}));
+		this.toDispose.push(this.debugService.getConfigurationManager().onDidConfigurationChange(name => {
+			this.setOptions(false).done(null, errors.onUnexpectedError);
 		}));
 	}
 
 	public render(container: HTMLElement): void {
 		dom.addClass(container, 'select-container');
 		container.appendChild(this.select);
-		this.setOptions().done(null, errors.onUnexpectedError);
+		this.setOptions(true).done(null, errors.onUnexpectedError);
 	}
 
-	private setOptions(): Promise {
-		var previousSelectedIndex = this.select.selectedIndex;
+	public focus(): void {
+		if (this.select) {
+			this.select.focus();
+		}
+	}
+
+	public blur(): void {
+		if (this.select) {
+			this.select.blur();
+		}
+	}
+
+	private setOptions(changeDebugConfiguration: boolean): TPromise<any> {
+		let previousSelectedIndex = this.select.selectedIndex;
 		this.select.options.length = 0;
 
-		return this.debugService.loadLaunchConfig().then(config => {
+		return this.debugService.getConfigurationManager().loadLaunchConfig().then(config => {
 			if (!config || !config.configurations) {
-				this.select.options.add(this.createOption('<none>'));
+				this.select.add(this.createOption(nls.localize('noConfigurations', "No Configurations")));
 				this.select.disabled = true;
-				return;
+				return changeDebugConfiguration ? this.actionRunner.run(this._action, null) : null;
 			}
 
-			var configurations = config.configurations;
+			const configurations = config.configurations;
 			this.select.disabled = configurations.length < 1;
-			var found = false;
-			var configuration = this.debugService.getConfiguration();
-			for (var i = 0; i < configurations.length; i++) {
-				this.select.options.add(this.createOption(configurations[i].name));
-				if (configuration && configuration.name === configurations[i].name) {
+
+			let found = false;
+			const configurationName = this.debugService.getConfigurationManager().configurationName;
+			for (let i = 0; i < configurations.length; i++) {
+				this.select.add(this.createOption(configurations[i].name));
+				if (configurationName === configurations[i].name) {
 					this.select.selectedIndex = i;
 					found = true;
 				}
@@ -77,13 +95,15 @@ export class SelectConfigActionItem extends actionbar.BaseActionItem {
 					previousSelectedIndex = 0;
 				}
 				this.select.selectedIndex = previousSelectedIndex;
-				return this.actionRunner.run(this._action, configurations[previousSelectedIndex].name);
+				if (changeDebugConfiguration) {
+					return this.actionRunner.run(this._action, configurations[previousSelectedIndex].name);
+				}
 			}
 		});
 	}
 
 	private createOption(value: string): HTMLOptionElement {
-		var option = document.createElement('option');
+		const option = document.createElement('option');
 		option.value = value;
 		option.text = value;
 
@@ -92,7 +112,7 @@ export class SelectConfigActionItem extends actionbar.BaseActionItem {
 
 	public dispose(): void {
 		this.debugService = null;
-		this.toDispose = lifecycle.disposeAll(this.toDispose);
+		this.toDispose = lifecycle.dispose(this.toDispose);
 
 		super.dispose();
 	}
